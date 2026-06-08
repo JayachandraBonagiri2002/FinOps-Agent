@@ -1,0 +1,38 @@
+# Environment
+.env
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation (internal dev notes)
+FIX_*.md
+SCAN_RESULTS_SUMMARY.md
+TROUBLESHOOTING.md
+RECOMMENDED_ACTIONS.md
+HISTORICAL_COST_ANALYSIS_GUIDE.md
+DATA_SOURCE_EXPLANATION.md
+WHATS_NEW.md
+FIX_SUBSCRIPTION_QUERY.md

@@ -1,0 +1,13 @@
+openai>=1.14.0
+streamlit>=1.32.0
+pandas>=2.2.0
+python-dotenv>=1.0.0
+plotly>=5.18.0
+azure-identity>=1.16.0
+azure-mgmt-costmanagement>=4.0.0
+azure-mgmt-compute>=31.0.0
+azure-mgmt-resource>=23.0.0
+azure-mgmt-monitor>=6.0.0
+azure-mgmt-network>=25.0.0
+azure-mgmt-storage>=21.0.0
+azure-mgmt-resourcegraph>=8.0.0

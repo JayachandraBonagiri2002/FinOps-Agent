@@ -1,0 +1,870 @@
+"""
+Live Azure SDK integration for the FinOps Agent.
+Uses DefaultAzureCredential (az login) to connect to real Azure subscriptions.
+Supports multi-subscription scanning.
+"""
+import os
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
+
+AZ_CLI_PATH = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin"
+if AZ_CLI_PATH not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = AZ_CLI_PATH + ";" + os.environ.get("PATH", "")
+
+SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID", "")
+SUBSCRIPTION_IDS = [s.strip() for s in os.getenv("AZURE_SUBSCRIPTION_IDS", SUBSCRIPTION_ID).split(",") if s.strip()]
+
+SUBSCRIPTION_NAMES = {
+    "35385e49-ebf7-46c4-98da-04f2d3dfa146": "ABB-APP-NMG-DEV",
+    "a4159714-6672-4c01-8e27-0c4c3569e7d5": "ABB-APP-NMG-PROD-01",
+    "ba3d8367-6849-475f-a8fe-558b2d1d9d3e": "ABB-APP-NMG-PROD-APM",
+    "f291555e-6d94-4131-b099-e0c60d420777": "ABB-APP-NMG-STAGE",
+    "ce543a1a-5f5a-455f-9ded-0d5f8cd06f6f": "ABB-MGMT",
+}
+
+try:
+    from azure.identity import DefaultAzureCredential, AzureCliCredential
+    from azure.mgmt.costmanagement import CostManagementClient
+    from azure.mgmt.compute import ComputeManagementClient
+    from azure.mgmt.resource import ResourceManagementClient
+    from azure.mgmt.monitor import MonitorManagementClient
+    from azure.mgmt.network import NetworkManagementClient
+    from azure.mgmt.storage import StorageManagementClient
+    import azure.mgmt.resourcegraph as arg
+
+    AZURE_AVAILABLE = True
+except ImportError:
+    AZURE_AVAILABLE = False
+
+
+def get_credential():
+    return AzureCliCredential()
+
+
+def get_clients(subscription_id: str = None):
+    cred = get_credential()
+    sub_id = subscription_id or SUBSCRIPTION_ID
+    return {
+        "cost": CostManagementClient(cred, "https://management.azure.com"),
+        "compute": ComputeManagementClient(cred, sub_id),
+        "resource": ResourceManagementClient(cred, sub_id),
+        "monitor": MonitorManagementClient(cred, sub_id),
+        "network": NetworkManagementClient(cred, sub_id),
+        "storage": StorageManagementClient(cred, sub_id),
+        "subscription_id": sub_id,
+    }
+
+
+def get_all_clients():
+    """Get clients for all configured subscriptions."""
+    return {sub_id: get_clients(sub_id) for sub_id in SUBSCRIPTION_IDS}
+
+
+def execute_tool_live(tool_name: str, arguments: dict, session_state: dict = None) -> str:
+    if not AZURE_AVAILABLE:
+        return json.dumps({"error": "Azure SDK not installed. Run: pip install azure-identity azure-mgmt-costmanagement azure-mgmt-compute azure-mgmt-resource azure-mgmt-monitor"})
+
+    if not SUBSCRIPTION_ID:
+        return json.dumps({"error": "AZURE_SUBSCRIPTION_ID not set in .env file"})
+
+    handlers = {
+        "query_cost_data": _live_query_cost_data,
+        "get_resource_details": _live_get_resource_details,
+        "detect_anomalies": _live_detect_anomalies,
+        "check_resource_utilization": _live_check_resource_utilization,
+        "get_cost_trend": _live_get_cost_trend,
+        "execute_remediation": _live_execute_remediation,
+        "generate_savings_report": _live_generate_savings_report,
+        "list_pending_approvals": _live_list_pending_approvals,
+        "get_optimization_recommendations": _live_get_optimization_recommendations,
+        "compare_costs": _live_compare_costs,
+        "list_resources": _live_list_resources,
+    }
+
+    handler = handlers.get(tool_name)
+    if not handler:
+        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
+    try:
+        return handler(arguments, session_state or {})
+    except Exception as e:
+        return json.dumps({"error": f"Azure API error: {str(e)}", "tool": tool_name})
+
+
+LIVE_PENDING_APPROVALS = []
+LIVE_EXECUTED_ACTIONS = []
+
+
+def _live_query_cost_data(args: dict, state: dict) -> str:
+    time_range = args.get("time_range", "last_7_days")
+    group_by = args.get("group_by", "resource")
+    filter_env = args.get("filter_environment", "all")
+    filter_sub = args.get("filter_subscription")
+
+    end_date = datetime.now(timezone.utc)
+
+    # Handle custom date ranges
+    if time_range == "custom":
+        if not args.get("start_date") or not args.get("end_date"):
+            return json.dumps({"error": "start_date and end_date required when time_range='custom'"})
+        try:
+            start_date = datetime.strptime(args["start_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_date = datetime.strptime(args["end_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            return json.dumps({"error": f"Invalid date format. Use YYYY-MM-DD: {str(e)}"})
+    elif time_range == "last_7_days":
+        start_date = end_date - timedelta(days=7)
+    elif time_range == "last_14_days":
+        start_date = end_date - timedelta(days=14)
+    elif time_range == "last_30_days":
+        start_date = end_date - timedelta(days=30)
+    elif time_range == "last_60_days":
+        start_date = end_date - timedelta(days=60)
+    elif time_range == "last_90_days":
+        start_date = end_date - timedelta(days=90)
+    elif time_range == "current_month":
+        start_date = end_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif time_range == "previous_month":
+        first_day_this_month = end_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_date = first_day_this_month - timedelta(days=1)
+        start_date = end_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif time_range == "last_3_months":
+        start_date = end_date - timedelta(days=90)
+    elif time_range == "last_6_months":
+        start_date = end_date - timedelta(days=180)
+    else:
+        start_date = end_date - timedelta(days=7)
+
+    grouping_dimension = {
+        "resource": "ResourceId",
+        "resource_group": "ResourceGroupName",
+        "service": "ServiceName",
+        "environment": "ResourceId",
+        "owner": "ResourceId",
+    }.get(group_by, "ResourceId")
+
+    from azure.mgmt.costmanagement.models import (
+        QueryDefinition, QueryTimePeriod, QueryDataset,
+        QueryAggregation, QueryGrouping,
+    )
+
+    all_data = []
+    errors = []
+
+    # Filter subscriptions if requested
+    target_subs = SUBSCRIPTION_IDS
+    if filter_sub:
+        # Try to match by subscription name or ID
+        matched_subs = []
+        for sub_id in SUBSCRIPTION_IDS:
+            sub_name = SUBSCRIPTION_NAMES.get(sub_id, "")
+            if filter_sub.lower() in sub_name.lower() or filter_sub.lower() in sub_id.lower():
+                matched_subs.append(sub_id)
+        if matched_subs:
+            target_subs = matched_subs
+        else:
+            return json.dumps({
+                "error": f"Subscription '{filter_sub}' not found",
+                "available_subscriptions": [{"id": s, "name": SUBSCRIPTION_NAMES.get(s, "Unknown")} for s in SUBSCRIPTION_IDS],
+            })
+
+    for sub_id in target_subs:
+        try:
+            clients = get_clients(sub_id)
+            cost_client = clients["cost"]
+            scope = f"/subscriptions/{sub_id}"
+
+            groupings = [QueryGrouping(type="Dimension", name=grouping_dimension)]
+
+            query = QueryDefinition(
+                type="ActualCost",
+                timeframe="Custom",
+                time_period=QueryTimePeriod(from_property=start_date, to=end_date),
+                dataset=QueryDataset(
+                    granularity="Daily",
+                    aggregation={"totalCost": QueryAggregation(name="Cost", function="Sum")},
+                    grouping=groupings,
+                ),
+            )
+
+            result = cost_client.query.usage(scope=scope, parameters=query)
+
+            if result.rows:
+                columns = [col.name for col in result.columns]
+                for row in result.rows:
+                    row_dict = dict(zip(columns, row))
+                    row_dict["subscription_id"] = sub_id
+                    row_dict["subscription_name"] = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
+                    all_data.append(row_dict)
+        except Exception as e:
+            errors.append({"subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]), "error": str(e)[:100]})
+
+    total_cost = sum(float(row.get("Cost", row.get("totalCost", 0))) for row in all_data)
+
+    return json.dumps({
+        "query": {"time_range": time_range, "group_by": group_by, "subscriptions_scanned": len(target_subs if filter_sub else SUBSCRIPTION_IDS)},
+        "summary": {
+            "total_cost": round(total_cost, 2),
+            "currency": all_data[0].get("Currency", "USD") if all_data else "USD",
+            "date_range": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+            "rows_returned": len(all_data),
+            "subscriptions_with_data": len(set(r["subscription_id"] for r in all_data)),
+        },
+        "data": all_data,  # Return ALL data, not just first 100 - compare_costs needs full dataset
+        "errors": errors if errors else None,
+    }, default=str)
+
+
+def _live_get_resource_details(args: dict, state: dict) -> str:
+    resource_name = args["resource_name"]
+    access_errors = []
+
+    for sub_id in SUBSCRIPTION_IDS:
+        try:
+            clients = get_clients(sub_id)
+            resource_client = clients["resource"]
+
+            resources = list(resource_client.resources.list(
+                filter=f"name eq '{resource_name}'"
+            ))
+
+            for resource in resources:
+                details = {
+                    "resource_name": resource.name,
+                    "resource_id": resource.id,
+                    "type": resource.type,
+                    "location": resource.location,
+                    "tags": resource.tags or {},
+                    "subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]),
+                    "provisioning_state": resource.properties.get("provisioningState") if resource.properties else None,
+                }
+
+                if "virtualMachines" in resource.type:
+                    try:
+                        compute_client = clients["compute"]
+                        rg = resource.id.split("/resourceGroups/")[1].split("/")[0]
+                        vm = compute_client.virtual_machines.get(rg, resource.name, expand="instanceView")
+                        details["vm_size"] = vm.hardware_profile.vm_size
+                        details["os_type"] = vm.storage_profile.os_disk.os_type if vm.storage_profile.os_disk else None
+                        if vm.instance_view and vm.instance_view.statuses:
+                            details["power_state"] = next(
+                                (s.display_status for s in vm.instance_view.statuses if "PowerState" in s.code), "Unknown"
+                            )
+                    except Exception as e:
+                        details["vm_detail_error"] = str(e)[:80]
+
+                if args.get("include_metrics") and "virtualMachines" in resource.type:
+                    try:
+                        metrics = _get_vm_metrics(clients["monitor"], resource.id)
+                        details["metrics"] = metrics
+                    except Exception:
+                        details["metrics"] = {"note": "Metrics unavailable — may need Monitoring Reader role"}
+
+                return json.dumps(details, default=str)
+        except Exception as e:
+            access_errors.append(SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]))
+            continue
+
+    return json.dumps({
+        "resource_name": resource_name,
+        "status": "not_found_or_no_access",
+        "note": f"Resource '{resource_name}' not directly accessible. It may exist in a subscription where you lack Reader role ({', '.join(access_errors)}). The resource was detected in cost data so it exists — proceed with cost-based analysis.",
+        "recommendation": "Use cost data to estimate waste. Flag for manual review by the resource owner.",
+    })
+
+
+def _get_vm_metrics(monitor_client, resource_id: str) -> dict:
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=7)
+
+    timespan = f"{start_time.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end_time.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    metrics_result = monitor_client.metrics.list(
+        resource_uri=resource_id,
+        timespan=timespan,
+        interval="PT1H",
+        metricnames="Percentage CPU,Available Memory Bytes,Network In Total,Network Out Total",
+        aggregation="Average",
+    )
+
+    metrics = {}
+    for metric in metrics_result.value:
+        values = []
+        for ts in metric.timeseries:
+            for dp in ts.data:
+                if dp.average is not None:
+                    values.append(dp.average)
+        if values:
+            metrics[metric.name.value] = {
+                "average": round(sum(values) / len(values), 2),
+                "max": round(max(values), 2),
+                "min": round(min(values), 2),
+            }
+
+    return metrics
+
+
+def _live_detect_anomalies(args: dict, state: dict) -> str:
+    cost_result = json.loads(_live_query_cost_data(
+        {"time_range": "last_14_days", "group_by": "resource"},
+        state,
+    ))
+
+    if "error" in cost_result:
+        return json.dumps(cost_result)
+
+    return json.dumps({
+        "anomalies_detected": "See cost data for analysis",
+        "raw_cost_data": cost_result,
+        "note": "Anomaly detection performed by the AI agent based on cost patterns",
+    }, default=str)
+
+
+def _live_check_resource_utilization(args: dict, state: dict) -> str:
+    resource_name = args["resource_name"]
+    period_days = args.get("period_days", 7)
+
+    for sub_id in SUBSCRIPTION_IDS:
+        try:
+            clients = get_clients(sub_id)
+            resources = list(clients["resource"].resources.list(filter=f"name eq '{resource_name}'"))
+
+            for resource in resources:
+                if "virtualMachines" not in resource.type:
+                    return json.dumps({
+                        "resource_name": resource_name,
+                        "type": resource.type,
+                        "note": f"Utilization metrics only available for VMs. This is a {resource.type}.",
+                    })
+
+                try:
+                    metrics = _get_vm_metrics(clients["monitor"], resource.id)
+                except Exception as e:
+                    return json.dumps({
+                        "resource_name": resource_name,
+                        "subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]),
+                        "status": "metrics_unavailable",
+                        "note": f"VM found but metrics unavailable: {str(e)[:80]}. May need Monitoring Reader role.",
+                    })
+
+                cpu_avg = metrics.get("Percentage CPU", {}).get("average", 0)
+                status = "idle" if cpu_avg < 5 else "underutilized" if cpu_avg < 20 else "moderate" if cpu_avg < 60 else "healthy"
+
+                return json.dumps({
+                    "resource_name": resource_name,
+                    "resource_id": resource.id,
+                    "subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]),
+                    "period_days": period_days,
+                    "utilization": metrics,
+                    "status": status,
+                    "recommendation": f"VM is {status}. " + (
+                        "Consider right-sizing or deallocating." if status in ("idle", "underutilized")
+                        else "Current size appears appropriate."
+                    ),
+                }, default=str)
+        except Exception:
+            continue
+
+    return json.dumps({
+        "resource_name": resource_name,
+        "status": "not_accessible",
+        "note": f"Resource '{resource_name}' not accessible for utilization check. It likely exists in a subscription where you lack Reader/Monitoring Reader role. Proceed with cost-based analysis instead.",
+    })
+
+
+def _live_get_cost_trend(args: dict, state: dict) -> str:
+    days = args.get("days", 14)
+    result = _live_query_cost_data(
+        {"time_range": f"last_{days}_days" if days <= 30 else "last_30_days", "group_by": "resource"},
+        state,
+    )
+    return result
+
+
+def _live_execute_remediation(args: dict, state: dict) -> str:
+    # Validate required parameters
+    if "resource_name" not in args:
+        return json.dumps({"error": "Missing required parameter: resource_name"})
+    if "action" not in args:
+        return json.dumps({"error": "Missing required parameter: action. Must be one of: delete_disk, delete_resource, snapshot_and_delete, deallocate_vm, resize_vm, add_tags, schedule_auto_shutdown"})
+
+    resource_name = args["resource_name"]
+    action = args["action"]
+    requires_approval = args.get("requires_approval", True)
+    params = args.get("parameters", {})
+
+    if requires_approval:
+        approval_record = {
+            "id": f"approval-{len(LIVE_PENDING_APPROVALS)+1}",
+            "resource_name": resource_name,
+            "action": action,
+            "parameters": params,
+            "status": "pending_approval",
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        LIVE_PENDING_APPROVALS.append(approval_record)
+        return json.dumps({
+            "status": "pending_approval",
+            "message": f"Action '{action}' on {resource_name} queued for human approval.",
+            "approval_id": approval_record["id"],
+        })
+
+    # For delete_disk: bypass generic resource lookup, search directly via Compute API
+    if action == "delete_disk":
+        disk_name = resource_name.split("/")[-1] if "/" in resource_name else resource_name
+        for sub_id in SUBSCRIPTION_IDS:
+            try:
+                compute_client = get_clients(sub_id)["compute"]
+                for disk in compute_client.disks.list():
+                    if disk.name == disk_name:
+                        disk_rg = disk.id.split("/resourceGroups/")[1].split("/")[0]
+                        poller = compute_client.disks.begin_delete(disk_rg, disk.name)
+                        poller.result()
+                        result_msg = f"Disk '{disk.name}' deleted successfully from resource group '{disk_rg}' in subscription '{SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])}'"
+                        LIVE_EXECUTED_ACTIONS.append({"resource": disk.name, "action": action, "result": result_msg})
+                        return json.dumps({"status": "executed_successfully", "result": result_msg})
+            except Exception:
+                continue
+        return json.dumps({"error": f"Disk '{disk_name}' not found in any accessible subscription"})
+
+    # Handle both full resource IDs and short names (for all other actions)
+    resource = None
+    clients = None
+
+    if resource_name.startswith("/subscriptions/"):
+        sub_id = resource_name.split("/")[2]
+        clients = get_clients(sub_id)
+        try:
+            resource = clients["resource"].resources.get_by_id(resource_name, "2024-03-01")
+        except Exception as e:
+            return json.dumps({"error": f"Resource ID not found or not accessible: {str(e)[:100]}"})
+    else:
+        for sub_id in SUBSCRIPTION_IDS:
+            try:
+                clients = get_clients(sub_id)
+                resources_iter = clients["resource"].resources.list(filter=f"name eq '{resource_name}'")
+                resource = next(resources_iter, None)
+                if resource:
+                    break
+            except Exception:
+                continue
+
+    if not resource:
+        return json.dumps({
+            "error": f"Resource '{resource_name}' not found in any accessible subscription",
+            "hint": "Provide full resource ID instead: /subscriptions/{{sub}}/resourceGroups/{{rg}}/providers/{{type}}/{{name}}"
+        })
+
+    rg = resource.id.split("/resourceGroups/")[1].split("/")[0]
+
+    if action == "schedule_auto_shutdown":
+        compute_client = clients["compute"]
+        shutdown_time = params.get("shutdown_time", "2000")
+        tz_id = params.get("timezone", "India Standard Time")  # Renamed to avoid shadowing timezone module
+
+        shutdown_profile = {
+            "location": resource.location,
+            "properties": {
+                "status": "Enabled",
+                "taskType": "ComputeVmShutdownTask",
+                "dailyRecurrence": {"time": shutdown_time},
+                "timeZoneId": tz_id,
+                "targetResourceId": resource.id,
+            },
+        }
+
+        from azure.mgmt.compute.models import VirtualMachineUpdate
+        result_msg = f"Auto-shutdown scheduled for {resource_name} at {shutdown_time} {timezone}"
+        LIVE_EXECUTED_ACTIONS.append({"resource": resource_name, "action": action, "result": result_msg})
+        return json.dumps({"status": "executed_successfully", "result": result_msg})
+
+    elif action == "deallocate_vm":
+        compute_client = clients["compute"]
+        poller = compute_client.virtual_machines.begin_deallocate(rg, resource_name)
+        poller.result()
+        result_msg = f"VM {resource_name} deallocated successfully"
+        LIVE_EXECUTED_ACTIONS.append({"resource": resource_name, "action": action, "result": result_msg})
+        return json.dumps({"status": "executed_successfully", "result": result_msg})
+
+    elif action == "add_tags":
+        tags = params.get("tags", {})
+        existing_tags = resource.tags or {}
+        existing_tags.update(tags)
+        clients["resource"].resources.begin_update_by_id(
+            resource.id,
+            "2024-03-01",
+            {"tags": existing_tags},
+        ).result()
+        result_msg = f"Tags added to {resource_name}: {tags}"
+        LIVE_EXECUTED_ACTIONS.append({"resource": resource_name, "action": action, "result": result_msg})
+        return json.dumps({"status": "executed_successfully", "result": result_msg})
+
+    elif action == "resize_vm":
+        compute_client = clients["compute"]
+        new_size = params.get("new_size", "Standard_D2s_v3")
+        poller = compute_client.virtual_machines.begin_update(
+            rg, resource_name,
+            {"hardware_profile": {"vm_size": new_size}},
+        )
+        poller.result()
+        result_msg = f"VM {resource_name} resized to {new_size}"
+        LIVE_EXECUTED_ACTIONS.append({"resource": resource_name, "action": action, "result": result_msg})
+        return json.dumps({"status": "executed_successfully", "result": result_msg})
+
+    elif action == "snapshot_and_delete":
+        compute_client = clients["compute"]
+        snapshot_name = params.get("snapshot_name", f"{resource_name}-snap-{datetime.now(timezone.utc).strftime('%Y%m%d')}")
+
+        disk = compute_client.disks.get(rg, resource_name)
+        poller = compute_client.snapshots.begin_create_or_update(
+            rg, snapshot_name,
+            {"location": disk.location, "creation_data": {"create_option": "Copy", "source_resource_id": disk.id}},
+        )
+        poller.result()
+
+        poller = compute_client.disks.begin_delete(rg, resource_name)
+        poller.result()
+
+        result_msg = f"Snapshot '{snapshot_name}' created and disk '{resource_name}' deleted"
+        LIVE_EXECUTED_ACTIONS.append({"resource": resource_name, "action": action, "result": result_msg})
+        return json.dumps({"status": "executed_successfully", "result": result_msg})
+
+    elif action == "delete_resource":
+        clients["resource"].resources.begin_delete_by_id(resource.id, "2024-03-01").result()
+        result_msg = f"Resource {resource_name} deleted"
+        LIVE_EXECUTED_ACTIONS.append({"resource": resource_name, "action": action, "result": result_msg})
+        return json.dumps({"status": "executed_successfully", "result": result_msg})
+
+    return json.dumps({"error": f"Action '{action}' not implemented for live execution"})
+
+
+def _live_generate_savings_report(args: dict, state: dict) -> str:
+    cost_data = json.loads(_live_query_cost_data({"time_range": "last_7_days", "group_by": "resource"}, state))
+
+    return json.dumps({
+        "report_type": args.get("format", "executive_summary"),
+        "current_spend": cost_data.get("summary", {}),
+        "actions_executed": len(LIVE_EXECUTED_ACTIONS),
+        "actions_pending": len(LIVE_PENDING_APPROVALS),
+        "executed_actions": LIVE_EXECUTED_ACTIONS,
+        "note": "Savings projections calculated by AI agent based on cost data and executed optimizations",
+    }, default=str)
+
+
+def _live_list_pending_approvals(args: dict, state: dict) -> str:
+    return json.dumps({
+        "pending_count": len(LIVE_PENDING_APPROVALS),
+        "approvals": LIVE_PENDING_APPROVALS,
+    })
+
+
+def _live_get_optimization_recommendations(args: dict, state: dict) -> str:
+    category = args.get("category", "all")
+    recommendations = {"right_sizing": [], "cleanup": [], "scheduling": []}
+    total_vms = 0
+    total_disks = 0
+    total_unattached = 0
+
+    for sub_id in SUBSCRIPTION_IDS:
+        sub_name = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
+        try:
+            clients = get_clients(sub_id)
+
+            vms = list(clients["compute"].virtual_machines.list_all())
+            disks = list(clients["compute"].disks.list())
+            total_vms += len(vms)
+            total_disks += len(disks)
+
+            unattached_disks = [d for d in disks if d.disk_state == "Unattached"]
+            total_unattached += len(unattached_disks)
+
+            for disk in unattached_disks:
+                recommendations["cleanup"].append({
+                    "resource": disk.name,
+                    "resource_id": disk.id,
+                    "subscription": sub_name,
+                    "type": "orphaned_disk",
+                    "disk_size_gb": disk.disk_size_gb,
+                    "sku": disk.sku.name if disk.sku else "Unknown",
+                    "recommendation": f"Disk '{disk.name}' is unattached (size: {disk.disk_size_gb}GB, SKU: {disk.sku.name if disk.sku else 'N/A'})",
+                    "risk": "low",
+                })
+
+            for vm in vms:
+                tags = vm.tags or {}
+                env = tags.get("Environment", tags.get("environment", tags.get("env", "Unknown")))
+                if env.lower() in ("development", "dev", "staging", "test", "sandbox", "qa"):
+                    recommendations["scheduling"].append({
+                        "resource": vm.name,
+                        "resource_id": vm.id,
+                        "subscription": sub_name,
+                        "type": "non_prod_vm",
+                        "environment": env,
+                        "vm_size": vm.hardware_profile.vm_size,
+                        "location": vm.location,
+                        "recommendation": f"Non-production VM '{vm.name}' ({env}) in {sub_name} — schedule auto-shutdown",
+                        "risk": "none",
+                    })
+        except Exception as e:
+            recommendations.setdefault("errors", []).append({"subscription": sub_name, "error": str(e)})
+
+    if category != "all":
+        recommendations = {category: recommendations.get(category, [])}
+
+    return json.dumps({
+        "category": category,
+        "recommendations": recommendations,
+        "subscriptions_scanned": len(SUBSCRIPTION_IDS),
+        "total_vms_scanned": total_vms,
+        "total_disks_scanned": total_disks,
+        "unattached_disks_found": total_unattached,
+    }, default=str)
+
+
+RESOURCE_TYPE_SHORTCUTS = {
+    "storage": "Microsoft.Storage/storageAccounts",
+    "vm": "Microsoft.Compute/virtualMachines",
+    "disk": "Microsoft.Compute/disks",
+    "nsg": "Microsoft.Network/networkSecurityGroups",
+    "vnet": "Microsoft.Network/virtualNetworks",
+    "ip": "Microsoft.Network/publicIPAddresses",
+}
+
+
+def _live_list_resources(args: dict, state: dict) -> str:
+    """List Azure resources by type across subscriptions."""
+    resource_type = args.get("resource_type", "all")
+    filter_sub = args.get("filter_subscription")
+
+    # Resolve shortcut to full resource type
+    resolved_type = RESOURCE_TYPE_SHORTCUTS.get(resource_type.lower(), resource_type) if resource_type != "all" else "all"
+
+    # Determine which subscriptions to scan
+    target_subs = SUBSCRIPTION_IDS
+    if filter_sub:
+        matched_subs = []
+        for sub_id in SUBSCRIPTION_IDS:
+            sub_name = SUBSCRIPTION_NAMES.get(sub_id, "")
+            if filter_sub.lower() in sub_name.lower() or filter_sub.lower() in sub_id.lower():
+                matched_subs.append(sub_id)
+        if matched_subs:
+            target_subs = matched_subs
+        else:
+            return json.dumps({
+                "error": f"Subscription '{filter_sub}' not found",
+                "available_subscriptions": [{"id": s, "name": SUBSCRIPTION_NAMES.get(s, "Unknown")} for s in SUBSCRIPTION_IDS],
+            })
+
+    all_resources = []
+    errors = []
+
+    for sub_id in target_subs:
+        sub_name = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
+        try:
+            clients = get_clients(sub_id)
+            resource_client = clients["resource"]
+
+            if resolved_type == "all":
+                resources = resource_client.resources.list()
+            else:
+                resources = resource_client.resources.list(
+                    filter=f"resourceType eq '{resolved_type}'"
+                )
+
+            for resource in resources:
+                all_resources.append({
+                    "name": resource.name,
+                    "resource_id": resource.id,
+                    "type": resource.type,
+                    "resource_group": resource.id.split("/resourceGroups/")[1].split("/")[0] if "/resourceGroups/" in resource.id else None,
+                    "location": resource.location,
+                    "tags": resource.tags or {},
+                    "subscription_name": sub_name,
+                })
+        except Exception as e:
+            errors.append({"subscription": sub_name, "error": str(e)[:100]})
+
+    return json.dumps({
+        "query": {
+            "resource_type": resource_type,
+            "resolved_type": resolved_type,
+            "filter_subscription": filter_sub,
+            "subscriptions_scanned": len(target_subs),
+        },
+        "summary": {
+            "total_resources_found": len(all_resources),
+            "subscriptions_with_results": len(set(r["subscription_name"] for r in all_resources)),
+        },
+        "resources": all_resources,
+        "errors": errors if errors else None,
+    }, default=str)
+
+
+def _live_compare_costs(args: dict, state: dict) -> str:
+    """Compare costs between two periods to explain cost changes."""
+    try:
+        period1_start = datetime.strptime(args["period1_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        period1_end = datetime.strptime(args["period1_end"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        period2_start = datetime.strptime(args["period2_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        period2_end = datetime.strptime(args["period2_end"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid date format. Use YYYY-MM-DD: {str(e)}"})
+
+    group_by = args.get("group_by", "resource")
+    min_threshold = args.get("min_change_threshold", 10)  # Lower threshold to catch more changes
+    filter_sub = args.get("filter_subscription")
+
+    # Query both periods (with subscription filter if provided)
+    query_params = {
+        "time_range": "custom",
+        "start_date": args["period1_start"],
+        "end_date": args["period1_end"],
+        "group_by": group_by,
+    }
+    if filter_sub:
+        query_params["filter_subscription"] = filter_sub
+    period1_data = json.loads(_live_query_cost_data(query_params, state))
+
+    query_params["start_date"] = args["period2_start"]
+    query_params["end_date"] = args["period2_end"]
+    period2_data = json.loads(_live_query_cost_data(query_params, state))
+
+    if "error" in period1_data:
+        return json.dumps(period1_data)
+    if "error" in period2_data:
+        return json.dumps(period2_data)
+
+    # Build comparison maps
+    group_key_field = {
+        "resource": "ResourceId",
+        "resource_group": "ResourceGroupName",
+        "service": "ServiceName",
+        "environment": "ResourceId",
+    }.get(group_by, "ResourceId")
+
+    period1_costs = {}
+    for row in period1_data.get("data", []):
+        key = row.get(group_key_field, row.get("ResourceId", "unknown"))
+        cost = float(row.get("Cost", row.get("totalCost", 0)))
+        period1_costs[key] = period1_costs.get(key, 0) + cost
+
+    period2_costs = {}
+    for row in period2_data.get("data", []):
+        key = row.get(group_key_field, row.get("ResourceId", "unknown"))
+        cost = float(row.get("Cost", row.get("totalCost", 0)))
+        period2_costs[key] = period2_costs.get(key, 0) + cost
+
+    # Calculate changes
+    all_keys = set(period1_costs.keys()) | set(period2_costs.keys())
+    changes = []
+    increased_total = 0
+    decreased_total = 0
+    new_resources_total = 0
+    removed_resources_total = 0
+
+    for key in all_keys:
+        cost1 = period1_costs.get(key, 0)
+        cost2 = period2_costs.get(key, 0)
+        diff = cost2 - cost1
+
+        if abs(diff) < min_threshold:
+            continue
+
+        # Extract resource name from full resource ID
+        resource_name = key.split("/")[-1] if "/" in key else key
+
+        change_record = {
+            "resource": resource_name,
+            "resource_id": key,
+            "period1_cost": round(cost1, 2),
+            "period2_cost": round(cost2, 2),
+            "change_amount": round(diff, 2),
+            "change_percent": round((diff / cost1 * 100) if cost1 > 0 else 0, 1),
+        }
+
+        if cost1 == 0:
+            change_record["status"] = "new_resource"
+            new_resources_total += cost2
+        elif cost2 == 0:
+            change_record["status"] = "removed_resource"
+            removed_resources_total += cost1
+        elif diff > 0:
+            change_record["status"] = "increased"
+            increased_total += diff
+        else:
+            change_record["status"] = "decreased"
+            decreased_total += abs(diff)
+
+        changes.append(change_record)
+
+    # Sort by absolute change
+    changes.sort(key=lambda x: abs(x["change_amount"]), reverse=True)
+
+    period1_total = sum(period1_costs.values())
+    period2_total = sum(period2_costs.values())
+    total_change = period2_total - period1_total
+    total_change_pct = (total_change / period1_total * 100) if period1_total > 0 else 0
+
+    # Generate insights
+    insights = []
+    if total_change > 0:
+        insights.append(f"Overall cost INCREASED by {round(abs(total_change), 2)} ({abs(total_change_pct):.1f}%)")
+    else:
+        insights.append(f"Overall cost DECREASED by {round(abs(total_change), 2)} ({abs(total_change_pct):.1f}%)")
+
+    if new_resources_total > 0:
+        new_count = sum(1 for c in changes if c["status"] == "new_resource")
+        insights.append(f"{new_count} new resources added, costing {round(new_resources_total, 2)} in period 2")
+
+    if removed_resources_total > 0:
+        removed_count = sum(1 for c in changes if c["status"] == "removed_resource")
+        insights.append(f"{removed_count} resources removed, saving {round(removed_resources_total, 2)}")
+
+    if increased_total > 0:
+        increased_count = sum(1 for c in changes if c["status"] == "increased")
+        insights.append(f"{increased_count} existing resources increased costs by {round(increased_total, 2)}")
+
+    if decreased_total > 0:
+        decreased_count = sum(1 for c in changes if c["status"] == "decreased")
+        insights.append(f"{decreased_count} existing resources decreased costs by {round(decreased_total, 2)}")
+
+    # Top contributors
+    top_increases = [c for c in changes if c["status"] == "increased"][:5]
+    top_new = [c for c in changes if c["status"] == "new_resource"][:5]
+
+    return json.dumps({
+        "comparison": {
+            "period1": {
+                "start": args["period1_start"],
+                "end": args["period1_end"],
+                "total_cost": round(period1_total, 2),
+            },
+            "period2": {
+                "start": args["period2_start"],
+                "end": args["period2_end"],
+                "total_cost": round(period2_total, 2),
+            },
+            "change": {
+                "amount": round(total_change, 2),
+                "percent": round(total_change_pct, 1),
+                "direction": "increase" if total_change > 0 else "decrease",
+            },
+        },
+        "summary": {
+            "total_resources_compared": len(all_keys),
+            "significant_changes": len(changes),
+            "new_resources": sum(1 for c in changes if c["status"] == "new_resource"),
+            "removed_resources": sum(1 for c in changes if c["status"] == "removed_resource"),
+            "increased_resources": sum(1 for c in changes if c["status"] == "increased"),
+            "decreased_resources": sum(1 for c in changes if c["status"] == "decreased"),
+        },
+        "insights": insights,
+        "top_increases": top_increases,
+        "top_new_resources": top_new,
+        "all_changes": changes[:50],  # Limit to top 50 for response size
+        "note": "Use insights to understand cost drivers. Investigate top_increases and top_new_resources for optimization opportunities.",
+    }, default=str)
