@@ -2,10 +2,24 @@ import streamlit as st
 import json
 import time
 import os
+import importlib
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 from dotenv import load_dotenv
+
+# Force reload tool modules so Streamlit picks up code changes without full restart
+import tools.azure_live
+import tools.executor
+import tools.definitions
+import utils.llm_client
+import orchestrator
+importlib.reload(tools.azure_live)
+importlib.reload(tools.definitions)
+importlib.reload(tools.executor)
+importlib.reload(utils.llm_client)
+importlib.reload(orchestrator)
+
 from orchestrator import run_autonomous_pipeline, run_conversational
 from tools.executor import execute_tool, PENDING_APPROVALS, EXECUTED_ACTIONS, LIVE_MODE
 
@@ -36,6 +50,28 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data(ttl=300)
+def _load_subscriptions():
+    """Fetch subscriptions from Azure based on logged-in user. Cached for 5 min."""
+    if LIVE_MODE:
+        try:
+            import subprocess
+            cmd = r'"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd" account list --query "[].{id:id, name:name, state:state}" -o json'
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, shell=True)
+            if result.returncode == 0:
+                all_subs = json.loads(result.stdout)
+                options = {"All Subscriptions": "all"}
+                for sub in all_subs:
+                    if sub.get("state") == "Enabled":
+                        options[sub["name"]] = sub["name"]
+                if len(options) > 1:
+                    return options
+        except Exception:
+            pass
+    return {"All Subscriptions": "all"}
+
+SUBSCRIPTION_OPTIONS = _load_subscriptions()
+
 # Session state init
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -49,6 +85,8 @@ if "approvals" not in st.session_state:
     st.session_state.approvals = []
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "chat"
+if "show_scan_selector" not in st.session_state:
+    st.session_state.show_scan_selector = False
 
 # Sidebar
 with st.sidebar:
@@ -80,7 +118,7 @@ with st.sidebar:
 <div style="text-align:center; color:#666; font-size:1.2em;">⬇ Function Calling ⬆ Results</div>
 
 <div style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px; margin-bottom: 8px;">
-<div style="text-align:center; color:#58a6ff; font-weight:bold; margin-bottom: 6px;">🔧 11 Azure Tools</div>
+<div style="text-align:center; color:#58a6ff; font-weight:bold; margin-bottom: 6px;">🔧 13 Azure Tools</div>
 <div style="display:flex; flex-wrap:wrap; gap:4px; justify-content:center;">
 <span style="background:#1f6feb33; color:#58a6ff; padding:2px 6px; border-radius:4px; font-size:0.8em;">Cost Query</span>
 <span style="background:#1f6feb33; color:#58a6ff; padding:2px 6px; border-radius:4px; font-size:0.8em;">Compare</span>
@@ -115,10 +153,10 @@ with st.sidebar:
     st.divider()
 
     st.markdown("### 🔧 Tools Available")
-    tool_names = ["query_cost_data", "compare_costs", "get_resource_details", "detect_anomalies", "check_resource_utilization", "get_cost_trend", "execute_remediation", "generate_savings_report", "list_pending_approvals", "get_optimization_recommendations"]
+    tool_names = ["query_cost_data", "compare_costs", "get_resource_details", "detect_anomalies", "check_resource_utilization", "get_cost_trend", "execute_remediation", "generate_savings_report", "list_pending_approvals", "get_optimization_recommendations", "list_resources", "get_role_assignments", "assign_role"]
     for t in tool_names:
         st.markdown(f"- `{t}`")
-    st.caption("✨ NEW: 6-month historical data + intelligent cost comparison")
+    st.caption("✨ NEW: RBAC query + role assignment with permission checks")
 
     st.divider()
     st.markdown("### 📊 Session Stats")
@@ -146,26 +184,41 @@ with tab_chat:
 
     # Quick action buttons
     col1, col2, col3, col4 = st.columns(4)
-    quick_prompts = {
-        "🔍 Full Scan": "Run a full FinOps optimization scan — detect all anomalies, check utilization, and recommend actions.",
-        "📈 Cost Trends": "Show me cost trends for the last 2 weeks. Which resources are increasing?",
-        "🗑️ Find Waste": "Find all orphaned, unused, or idle resources that are wasting money.",
-        "💡 Recommendations": "Give me all optimization recommendations — right-sizing, scheduling, Reserved Instances, and cleanup.",
-    }
 
     clicked_prompt = None
     with col1:
         if st.button("🔍 Full Scan", use_container_width=True):
-            clicked_prompt = quick_prompts["🔍 Full Scan"]
+            st.session_state.show_scan_selector = True
     with col2:
         if st.button("📈 Cost Trends", use_container_width=True):
-            clicked_prompt = quick_prompts["📈 Cost Trends"]
+            clicked_prompt = "Show me cost trends for the last 2 weeks. Which resources are increasing?"
     with col3:
         if st.button("🗑️ Find Waste", use_container_width=True):
-            clicked_prompt = quick_prompts["🗑️ Find Waste"]
+            clicked_prompt = "Find all orphaned, unused, or idle resources that are wasting money."
     with col4:
         if st.button("💡 Recommendations", use_container_width=True):
-            clicked_prompt = quick_prompts["💡 Recommendations"]
+            clicked_prompt = "Give me all optimization recommendations — right-sizing, scheduling, Reserved Instances, and cleanup."
+
+    # Subscription selector for Full Scan
+    if st.session_state.show_scan_selector:
+        st.markdown("---")
+        st.markdown("#### Select subscription to scan")
+        scan_cols = st.columns([3, 1])
+        with scan_cols[0]:
+            selected_sub = st.selectbox(
+                "Choose a subscription",
+                options=list(SUBSCRIPTION_OPTIONS.keys()),
+                index=0,
+                label_visibility="collapsed",
+            )
+        with scan_cols[1]:
+            if st.button("▶ Run Scan", type="primary", use_container_width=True):
+                st.session_state.show_scan_selector = False
+                sub_value = SUBSCRIPTION_OPTIONS[selected_sub]
+                if sub_value == "all":
+                    clicked_prompt = "Run a full FinOps optimization scan across ALL subscriptions — detect all anomalies, check utilization, and recommend actions."
+                else:
+                    clicked_prompt = f"Run a full FinOps optimization scan on subscription '{sub_value}' only — detect anomalies, check utilization, and recommend actions. Use filter_subscription='{sub_value}' in all tool calls."
 
     st.divider()
 

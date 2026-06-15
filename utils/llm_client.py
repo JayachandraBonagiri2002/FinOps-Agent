@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 from openai import AzureOpenAI, RateLimitError
 from dotenv import load_dotenv
 
@@ -14,10 +15,118 @@ client = AzureOpenAI(
 
 DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4.1-mini")
 
+MAX_TOOL_RESULT_CHARS = 10000
+
+
+def _truncate_tool_result(result: str) -> str:
+    """Intelligently compress tool results to stay within token budget.
+
+    Instead of sending 50KB of raw Azure data to the LLM, extract the
+    summary/insights and limit raw data to top items. Always returns valid JSON.
+    """
+    if len(result) <= MAX_TOOL_RESULT_CHARS:
+        return result
+
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return result[:MAX_TOOL_RESULT_CHARS - 50] + '... [truncated]"}'
+
+    compressed = {}
+
+    for key in ("summary", "query", "comparison", "insights", "category",
+                "anomalies_detected", "total_potential_monthly_savings_inr",
+                "total_potential_annual_savings_inr", "subscriptions_scanned",
+                "total_vms_scanned", "total_disks_scanned", "unattached_disks_found",
+                "status", "resource_name", "utilization", "recommendation",
+                "note", "errors"):
+        if key in data:
+            compressed[key] = data[key]
+
+    for key in ("data", "resources", "all_changes"):
+        if key in data and isinstance(data[key], list):
+            total_count = len(data[key])
+            compressed[f"{key}_total_count"] = total_count
+            compressed[key] = data[key][:15]
+            if total_count > 15:
+                compressed[f"_{key}_note"] = f"Showing top 15 of {total_count}. Use totals from 'summary' for accurate counts — do NOT count this list."
+
+    if "recommendations" in data:
+        recs = data["recommendations"]
+        if isinstance(recs, dict):
+            compressed["recommendations"] = {}
+            for cat, items in recs.items():
+                if isinstance(items, list):
+                    compressed["recommendations"][cat] = items[:10]
+                else:
+                    compressed["recommendations"][cat] = items
+        else:
+            compressed["recommendations"] = recs
+
+    if "anomalies" in data and isinstance(data["anomalies"], list):
+        compressed["anomalies"] = data["anomalies"][:10]
+        if len(data["anomalies"]) > 10:
+            compressed["_anomalies_note"] = f"Showing top 10 of {len(data['anomalies'])}"
+
+    if "raw_cost_data" in data:
+        raw = data["raw_cost_data"]
+        if isinstance(raw, dict):
+            compressed["raw_cost_data"] = {
+                "summary": raw.get("summary"),
+                "query": raw.get("query"),
+            }
+            if "data" in raw and isinstance(raw["data"], list):
+                compressed["raw_cost_data"]["data"] = raw["data"][:10]
+                compressed["raw_cost_data"]["_data_count"] = len(raw["data"])
+
+    for key in ("top_increases", "top_new_resources"):
+        if key in data:
+            compressed[key] = data[key][:5]
+
+    if not compressed:
+        compressed = data
+
+    out = json.dumps(compressed, default=str)
+
+    if len(out) > MAX_TOOL_RESULT_CHARS:
+        for key in ("data", "resources", "all_changes", "anomalies"):
+            if key in compressed and isinstance(compressed[key], list) and len(compressed[key]) > 5:
+                compressed[key] = compressed[key][:5]
+                compressed[f"_{key}_note"] = f"Trimmed to top 5 to fit response size. See '{key}_total_count' or 'summary' for real totals."
+        out = json.dumps(compressed, default=str)
+
+    if len(out) > MAX_TOOL_RESULT_CHARS:
+        for key in ("data", "resources", "all_changes"):
+            if key in compressed and isinstance(compressed[key], list):
+                compressed.pop(key)
+                compressed[f"_{key}_note"] = f"Data omitted for size. Total count in 'summary' field."
+        out = json.dumps(compressed, default=str)
+
+    return out
+
+
+def _get_retry_after(error: RateLimitError) -> int:
+    """Extract retry-after seconds from a RateLimitError response."""
+    try:
+        if hasattr(error, 'response') and error.response is not None:
+            retry_after = error.response.headers.get("Retry-After") or error.response.headers.get("retry-after")
+            if retry_after:
+                return int(retry_after)
+        error_body = str(error)
+        match = re.search(r'retry after (\d+) second', error_body, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'Please retry after (\d+)', error_body)
+        if match:
+            return int(match.group(1))
+    except (ValueError, AttributeError):
+        pass
+    return 0
+
 
 def chat(system_prompt: str, user_message: str, temperature: float = 0.3) -> str:
-    max_retries = 7
-    retry_delay = 5  # Start at 5 seconds to respect rate limits
+    max_retries = 5
+    base_delay = 10
 
     for retry in range(max_retries):
         try:
@@ -33,7 +142,9 @@ def chat(system_prompt: str, user_message: str, temperature: float = 0.3) -> str
             return response.choices[0].message.content
         except RateLimitError as e:
             if retry < max_retries - 1:
-                wait_time = retry_delay * (2 ** retry)  # Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s
+                retry_after = _get_retry_after(e)
+                wait_time = max(retry_after, base_delay * (2 ** retry))
+                wait_time = min(wait_time, 120)
                 print(f"Rate limit hit. Waiting {wait_time}s before retry {retry + 1}/{max_retries}...")
                 time.sleep(wait_time)
             else:
@@ -49,13 +160,11 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
     while iterations < max_iterations:
         iterations += 1
 
-        # Add a small delay between iterations to avoid rapid-fire requests
         if iterations > 1:
-            time.sleep(2)
+            time.sleep(1)
 
-        # Retry logic for rate limits
-        max_retries = 7
-        retry_delay = 5  # Start with 5 seconds to respect rate limits
+        max_retries = 5
+        base_delay = 10
 
         for retry in range(max_retries):
             try:
@@ -67,15 +176,16 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
                     temperature=temperature,
                     max_tokens=4000,
                 )
-                break  # Success, exit retry loop
+                break
             except RateLimitError as e:
                 if retry < max_retries - 1:
-                    wait_time = retry_delay * (2 ** retry)  # Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s
+                    retry_after = _get_retry_after(e)
+                    wait_time = max(retry_after, base_delay * (2 ** retry))
+                    wait_time = min(wait_time, 120)
                     print(f"Rate limit hit. Waiting {wait_time}s before retry {retry + 1}/{max_retries}...")
                     time.sleep(wait_time)
                 else:
-                    # Last retry failed, return error message
-                    error_msg = f"OpenAI API rate limit exceeded. Please wait a few minutes and try again. Error: {str(e)}"
+                    error_msg = f"OpenAI API rate limit exceeded after {max_retries} retries. Error: {str(e)}"
                     return error_msg, tool_calls_log
 
         message = response.choices[0].message
@@ -85,9 +195,15 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
 
         messages.append(message)
 
-        for tool_call in message.tool_calls:
+        cost_api_tools = {"query_cost_data", "compare_costs", "detect_anomalies", "get_cost_trend", "generate_savings_report"}
+
+        for i, tool_call in enumerate(message.tool_calls):
             fn_name = tool_call.function.name
             fn_args = json.loads(tool_call.function.arguments)
+
+            # Stagger calls to cost-heavy tools to avoid Azure 429 rate limits
+            if i > 0 and fn_name in cost_api_tools:
+                time.sleep(2)
 
             tool_calls_log.append({
                 "iteration": iterations,
@@ -97,12 +213,14 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
 
             result = execute_tool(fn_name, fn_args)
 
+            compressed_result = _truncate_tool_result(result)
+
             tool_calls_log[-1]["result_preview"] = result[:200] + "..." if len(result) > 200 else result
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
-                "content": result,
+                "content": compressed_result,
             })
 
     return messages[-1].get("content", "Agent reached maximum iterations."), tool_calls_log

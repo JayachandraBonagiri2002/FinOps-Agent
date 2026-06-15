@@ -6,7 +6,9 @@ Supports multi-subscription scanning.
 import os
 import json
 import sys
+import signal
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,13 +20,41 @@ if AZ_CLI_PATH not in os.environ.get("PATH", ""):
 SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID", "")
 SUBSCRIPTION_IDS = [s.strip() for s in os.getenv("AZURE_SUBSCRIPTION_IDS", SUBSCRIPTION_ID).split(",") if s.strip()]
 
-SUBSCRIPTION_NAMES = {
-    "35385e49-ebf7-46c4-98da-04f2d3dfa146": "ABB-APP-NMG-DEV",
-    "a4159714-6672-4c01-8e27-0c4c3569e7d5": "ABB-APP-NMG-PROD-01",
-    "ba3d8367-6849-475f-a8fe-558b2d1d9d3e": "ABB-APP-NMG-PROD-APM",
-    "f291555e-6d94-4131-b099-e0c60d420777": "ABB-APP-NMG-STAGE",
-    "ce543a1a-5f5a-455f-9ded-0d5f8cd06f6f": "ABB-MGMT",
-}
+SUBSCRIPTION_NAMES = {}
+
+
+def fetch_subscriptions_from_azure():
+    """Dynamically fetch all subscriptions accessible to the logged-in user via az CLI."""
+    global SUBSCRIPTION_IDS, SUBSCRIPTION_NAMES
+    try:
+        import subprocess
+        az_cmd = os.path.join(AZ_CLI_PATH, "az.cmd")
+        result = subprocess.run(
+            f'"{az_cmd}" account list --query "[?state==\'Enabled\'].{{id:id, name:name}}" -o json',
+            capture_output=True, text=True, timeout=15, shell=True,
+        )
+        if result.returncode == 0:
+            subs = json.loads(result.stdout)
+            fetched_ids = []
+            fetched_names = {}
+            for sub in subs:
+                fetched_ids.append(sub["id"])
+                fetched_names[sub["id"]] = sub["name"]
+            if fetched_ids:
+                SUBSCRIPTION_IDS = fetched_ids
+                SUBSCRIPTION_NAMES = fetched_names
+                return fetched_names
+    except Exception:
+        pass
+    return SUBSCRIPTION_NAMES
+
+
+def get_available_subscriptions() -> dict:
+    """Return {subscription_id: display_name} for all accessible subscriptions.
+    Caches after first call."""
+    if not SUBSCRIPTION_NAMES:
+        fetch_subscriptions_from_azure()
+    return SUBSCRIPTION_NAMES
 
 try:
     from azure.identity import DefaultAzureCredential, AzureCliCredential
@@ -34,11 +64,16 @@ try:
     from azure.mgmt.monitor import MonitorManagementClient
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.storage import StorageManagementClient
+    from azure.mgmt.authorization import AuthorizationManagementClient
     import azure.mgmt.resourcegraph as arg
 
     AZURE_AVAILABLE = True
 except ImportError:
     AZURE_AVAILABLE = False
+
+# Auto-populate subscriptions from az login on module load
+if AZURE_AVAILABLE and not SUBSCRIPTION_NAMES:
+    fetch_subscriptions_from_azure()
 
 
 def get_credential():
@@ -83,16 +118,46 @@ def execute_tool_live(tool_name: str, arguments: dict, session_state: dict = Non
         "get_optimization_recommendations": _live_get_optimization_recommendations,
         "compare_costs": _live_compare_costs,
         "list_resources": _live_list_resources,
+        "get_role_assignments": _live_get_role_assignments,
+        "assign_role": _live_assign_role,
     }
 
     handler = handlers.get(tool_name)
     if not handler:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
-    try:
-        return handler(arguments, session_state or {})
-    except Exception as e:
-        return json.dumps({"error": f"Azure API error: {str(e)}", "tool": tool_name})
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(handler, arguments, session_state or {})
+                result = future.result(timeout=90)
+
+            # Check if result is a rate-limit error and retry
+            try:
+                parsed = json.loads(result)
+                if "error" in parsed and ("429" in str(parsed["error"]) or "Too many requests" in str(parsed["error"]) or "TooManyRequests" in str(parsed["error"])):
+                    if attempt < max_retries - 1:
+                        import time
+                        wait = 10 * (attempt + 1)
+                        time.sleep(wait)
+                        continue
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            return result
+        except FuturesTimeoutError:
+            return json.dumps({"error": f"Tool '{tool_name}' timed out after 90 seconds. Azure APIs may be slow — try a narrower query.", "tool": tool_name})
+        except Exception as e:
+            error_str = str(e)
+            if ("429" in error_str or "TooManyRequests" in error_str) and attempt < max_retries - 1:
+                import time
+                wait = 10 * (attempt + 1)
+                time.sleep(wait)
+                continue
+            return json.dumps({"error": f"Azure API error: {error_str}", "tool": tool_name})
+
+    return json.dumps({"error": f"Tool '{tool_name}' failed after {max_retries} retries due to rate limiting. Please wait a minute and try again.", "tool": tool_name})
 
 
 LIVE_PENDING_APPROVALS = []
@@ -158,7 +223,6 @@ def _live_query_cost_data(args: dict, state: dict) -> str:
     # Filter subscriptions if requested
     target_subs = SUBSCRIPTION_IDS
     if filter_sub:
-        # Try to match by subscription name or ID
         matched_subs = []
         for sub_id in SUBSCRIPTION_IDS:
             sub_name = SUBSCRIPTION_NAMES.get(sub_id, "")
@@ -172,36 +236,56 @@ def _live_query_cost_data(args: dict, state: dict) -> str:
                 "available_subscriptions": [{"id": s, "name": SUBSCRIPTION_NAMES.get(s, "Unknown")} for s in SUBSCRIPTION_IDS],
             })
 
-    for sub_id in target_subs:
-        try:
-            clients = get_clients(sub_id)
-            cost_client = clients["cost"]
-            scope = f"/subscriptions/{sub_id}"
+    def _query_single_sub(sub_id):
+        import time as _time
+        clients = get_clients(sub_id)
+        cost_client = clients["cost"]
+        scope = f"/subscriptions/{sub_id}"
 
-            groupings = [QueryGrouping(type="Dimension", name=grouping_dimension)]
+        groupings = [QueryGrouping(type="Dimension", name=grouping_dimension)]
 
-            query = QueryDefinition(
-                type="ActualCost",
-                timeframe="Custom",
-                time_period=QueryTimePeriod(from_property=start_date, to=end_date),
-                dataset=QueryDataset(
-                    granularity="Daily",
-                    aggregation={"totalCost": QueryAggregation(name="Cost", function="Sum")},
-                    grouping=groupings,
-                ),
-            )
+        query = QueryDefinition(
+            type="ActualCost",
+            timeframe="Custom",
+            time_period=QueryTimePeriod(from_property=start_date, to=end_date),
+            dataset=QueryDataset(
+                granularity="Daily",
+                aggregation={"totalCost": QueryAggregation(name="Cost", function="Sum")},
+                grouping=groupings,
+            ),
+        )
 
-            result = cost_client.query.usage(scope=scope, parameters=query)
+        for retry in range(3):
+            try:
+                result = cost_client.query.usage(scope=scope, parameters=query)
+                break
+            except Exception as e:
+                if ("429" in str(e) or "TooManyRequests" in str(e)) and retry < 2:
+                    _time.sleep(10 * (retry + 1))
+                    continue
+                raise
 
-            if result.rows:
-                columns = [col.name for col in result.columns]
-                for row in result.rows:
-                    row_dict = dict(zip(columns, row))
-                    row_dict["subscription_id"] = sub_id
-                    row_dict["subscription_name"] = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
-                    all_data.append(row_dict)
-        except Exception as e:
-            errors.append({"subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]), "error": str(e)[:100]})
+        rows = []
+        if result.rows:
+            columns = [col.name for col in result.columns]
+            for row in result.rows:
+                row_dict = dict(zip(columns, row))
+                row_dict["subscription_id"] = sub_id
+                row_dict["subscription_name"] = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
+                rows.append(row_dict)
+        return rows
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_query_single_sub, sub_id): sub_id for sub_id in target_subs}
+        for future in futures:
+            sub_id = futures[future]
+            try:
+                rows = future.result(timeout=60)
+                all_data.extend(rows)
+            except FuturesTimeoutError:
+                errors.append({"subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]), "error": "Timed out after 60s"})
+            except Exception as e:
+                errors.append({"subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]), "error": str(e)[:100]})
 
     total_cost = sum(float(row.get("Cost", row.get("totalCost", 0))) for row in all_data)
 
@@ -317,10 +401,98 @@ def _live_detect_anomalies(args: dict, state: dict) -> str:
     if "error" in cost_result:
         return json.dumps(cost_result)
 
+    rows = cost_result.get("data", [])
+    if not rows:
+        return json.dumps({"anomalies_detected": 0, "anomalies": [], "note": "No cost data available for analysis"})
+
+    resource_costs = {}
+    for row in rows:
+        res_id = row.get("ResourceId", row.get("resource_id", "unknown"))
+        cost = float(row.get("Cost", row.get("totalCost", 0)))
+        sub_name = row.get("subscription_name", "")
+        if res_id not in resource_costs:
+            resource_costs[res_id] = {"total_cost": 0, "days": set(), "subscription": sub_name}
+        resource_costs[res_id]["total_cost"] += cost
+        usage_date = str(row.get("UsageDate", row.get("BillingPeriod", "")))[:10]
+        if usage_date:
+            resource_costs[res_id]["days"].add(usage_date)
+
+    min_cost = args.get("min_cost_threshold_inr", 100)
+    sensitivity = args.get("sensitivity", "medium")
+    threshold_multiplier = {"low": 2.0, "medium": 1.5, "high": 1.2}.get(sensitivity, 1.5)
+
+    sorted_resources = sorted(resource_costs.items(), key=lambda x: x[1]["total_cost"], reverse=True)
+    total_cost = sum(r[1]["total_cost"] for r in sorted_resources)
+    avg_cost = total_cost / max(len(sorted_resources), 1)
+
+    anomalies = []
+    for res_id, data in sorted_resources:
+        daily_avg = data["total_cost"] / max(len(data["days"]), 1)
+        if daily_avg < min_cost:
+            continue
+
+        resource_name = res_id.split("/")[-1] if "/" in res_id else res_id
+        resource_type = ""
+        parts = res_id.split("/providers/")
+        if len(parts) > 1:
+            type_parts = parts[1].split("/")
+            if len(type_parts) >= 2:
+                resource_type = f"{type_parts[0]}/{type_parts[1]}"
+
+        is_anomaly = False
+        anomaly_type = "high_cost"
+        description = ""
+
+        if data["total_cost"] > avg_cost * threshold_multiplier:
+            is_anomaly = True
+            anomaly_type = "cost_spike"
+            description = f"Cost {data['total_cost']:.0f} is {data['total_cost']/max(avg_cost,1):.1f}x the average resource cost"
+
+        if len(data["days"]) >= 13 and daily_avg > min_cost * 2:
+            is_anomaly = True
+            anomaly_type = "continuous_high_spend"
+            description = f"Consistently high spend ({daily_avg:.0f}/day) across all 14 days"
+
+        if "restorePointCollections" in res_id or "snapshots" in res_id:
+            is_anomaly = True
+            anomaly_type = "backup_accumulation"
+            description = f"Restore points/snapshots accumulating cost ({data['total_cost']:.0f} over 14 days)"
+
+        if "disks" in res_id.lower() and "Unattached" in str(data):
+            is_anomaly = True
+            anomaly_type = "orphaned_disk"
+            description = f"Disk incurring cost ({data['total_cost']:.0f} over 14 days) — verify if attached"
+
+        if is_anomaly:
+            anomalies.append({
+                "resource_name": resource_name,
+                "resource_id": res_id,
+                "resource_type": resource_type,
+                "subscription": data["subscription"],
+                "type": anomaly_type,
+                "severity": "High" if daily_avg > min_cost * 10 else "Medium" if daily_avg > min_cost * 3 else "Low",
+                "total_cost_14d": round(data["total_cost"], 2),
+                "daily_average": round(daily_avg, 2),
+                "days_active": len(data["days"]),
+                "description": description,
+                "potential_monthly_savings": round(daily_avg * 30 * 0.3, 2),
+            })
+
+    anomalies.sort(key=lambda x: x["total_cost_14d"], reverse=True)
+
     return json.dumps({
-        "anomalies_detected": "See cost data for analysis",
-        "raw_cost_data": cost_result,
-        "note": "Anomaly detection performed by the AI agent based on cost patterns",
+        "anomalies_detected": len(anomalies),
+        "total_resources_analyzed": len(sorted_resources),
+        "total_cost_14d": round(total_cost, 2),
+        "average_resource_cost_14d": round(avg_cost, 2),
+        "sensitivity": sensitivity,
+        "anomalies": anomalies[:20],
+        "summary": {
+            "high_severity": sum(1 for a in anomalies if a["severity"] == "High"),
+            "medium_severity": sum(1 for a in anomalies if a["severity"] == "Medium"),
+            "low_severity": sum(1 for a in anomalies if a["severity"] == "Low"),
+            "total_potential_monthly_savings": round(sum(a["potential_monthly_savings"] for a in anomalies), 2),
+        },
     }, default=str)
 
 
@@ -562,55 +734,81 @@ def _live_list_pending_approvals(args: dict, state: dict) -> str:
     })
 
 
+def _scan_subscription_recommendations(sub_id: str):
+    """Scan a single subscription for optimization recommendations."""
+    sub_name = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
+    result = {"cleanup": [], "scheduling": [], "vms": 0, "disks": 0, "unattached": 0, "errors": []}
+    try:
+        clients = get_clients(sub_id)
+
+        vms = list(clients["compute"].virtual_machines.list_all())
+        disks = list(clients["compute"].disks.list())
+        result["vms"] = len(vms)
+        result["disks"] = len(disks)
+
+        unattached_disks = [d for d in disks if d.disk_state == "Unattached"]
+        result["unattached"] = len(unattached_disks)
+
+        for disk in unattached_disks:
+            result["cleanup"].append({
+                "resource": disk.name,
+                "resource_id": disk.id,
+                "subscription": sub_name,
+                "type": "orphaned_disk",
+                "disk_size_gb": disk.disk_size_gb,
+                "sku": disk.sku.name if disk.sku else "Unknown",
+                "recommendation": f"Disk '{disk.name}' is unattached (size: {disk.disk_size_gb}GB, SKU: {disk.sku.name if disk.sku else 'N/A'})",
+                "risk": "low",
+            })
+
+        for vm in vms:
+            tags = vm.tags or {}
+            env = tags.get("Environment", tags.get("environment", tags.get("env", "Unknown")))
+            if env.lower() in ("development", "dev", "staging", "test", "sandbox", "qa"):
+                result["scheduling"].append({
+                    "resource": vm.name,
+                    "resource_id": vm.id,
+                    "subscription": sub_name,
+                    "type": "non_prod_vm",
+                    "environment": env,
+                    "vm_size": vm.hardware_profile.vm_size,
+                    "location": vm.location,
+                    "recommendation": f"Non-production VM '{vm.name}' ({env}) in {sub_name} — schedule auto-shutdown",
+                    "risk": "none",
+                })
+    except Exception as e:
+        result["errors"].append({"subscription": sub_name, "error": str(e)[:100]})
+    return result
+
+
 def _live_get_optimization_recommendations(args: dict, state: dict) -> str:
     category = args.get("category", "all")
     recommendations = {"right_sizing": [], "cleanup": [], "scheduling": []}
     total_vms = 0
     total_disks = 0
     total_unattached = 0
+    errors = []
 
-    for sub_id in SUBSCRIPTION_IDS:
-        sub_name = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
-        try:
-            clients = get_clients(sub_id)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_scan_subscription_recommendations, sub_id): sub_id for sub_id in SUBSCRIPTION_IDS}
+        for future in futures:
+            try:
+                result = future.result(timeout=45)
+                recommendations["cleanup"].extend(result["cleanup"])
+                recommendations["scheduling"].extend(result["scheduling"])
+                total_vms += result["vms"]
+                total_disks += result["disks"]
+                total_unattached += result["unattached"]
+                errors.extend(result["errors"])
+            except FuturesTimeoutError:
+                sub_name = SUBSCRIPTION_NAMES.get(futures[future], futures[future][:8])
+                errors.append({"subscription": sub_name, "error": "Timed out after 45s"})
+            except Exception as e:
+                sub_name = SUBSCRIPTION_NAMES.get(futures[future], futures[future][:8])
+                errors.append({"subscription": sub_name, "error": str(e)[:100]})
 
-            vms = list(clients["compute"].virtual_machines.list_all())
-            disks = list(clients["compute"].disks.list())
-            total_vms += len(vms)
-            total_disks += len(disks)
-
-            unattached_disks = [d for d in disks if d.disk_state == "Unattached"]
-            total_unattached += len(unattached_disks)
-
-            for disk in unattached_disks:
-                recommendations["cleanup"].append({
-                    "resource": disk.name,
-                    "resource_id": disk.id,
-                    "subscription": sub_name,
-                    "type": "orphaned_disk",
-                    "disk_size_gb": disk.disk_size_gb,
-                    "sku": disk.sku.name if disk.sku else "Unknown",
-                    "recommendation": f"Disk '{disk.name}' is unattached (size: {disk.disk_size_gb}GB, SKU: {disk.sku.name if disk.sku else 'N/A'})",
-                    "risk": "low",
-                })
-
-            for vm in vms:
-                tags = vm.tags or {}
-                env = tags.get("Environment", tags.get("environment", tags.get("env", "Unknown")))
-                if env.lower() in ("development", "dev", "staging", "test", "sandbox", "qa"):
-                    recommendations["scheduling"].append({
-                        "resource": vm.name,
-                        "resource_id": vm.id,
-                        "subscription": sub_name,
-                        "type": "non_prod_vm",
-                        "environment": env,
-                        "vm_size": vm.hardware_profile.vm_size,
-                        "location": vm.location,
-                        "recommendation": f"Non-production VM '{vm.name}' ({env}) in {sub_name} — schedule auto-shutdown",
-                        "risk": "none",
-                    })
-        except Exception as e:
-            recommendations.setdefault("errors", []).append({"subscription": sub_name, "error": str(e)})
+    if errors:
+        recommendations["errors"] = errors
 
     if category != "all":
         recommendations = {category: recommendations.get(category, [])}
@@ -662,31 +860,43 @@ def _live_list_resources(args: dict, state: dict) -> str:
     all_resources = []
     errors = []
 
-    for sub_id in target_subs:
+    def _list_sub_resources(sub_id):
         sub_name = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
-        try:
-            clients = get_clients(sub_id)
-            resource_client = clients["resource"]
+        clients = get_clients(sub_id)
+        resource_client = clients["resource"]
 
-            if resolved_type == "all":
-                resources = resource_client.resources.list()
-            else:
-                resources = resource_client.resources.list(
-                    filter=f"resourceType eq '{resolved_type}'"
-                )
+        if resolved_type == "all":
+            resources = resource_client.resources.list()
+        else:
+            resources = resource_client.resources.list(
+                filter=f"resourceType eq '{resolved_type}'"
+            )
 
-            for resource in resources:
-                all_resources.append({
-                    "name": resource.name,
-                    "resource_id": resource.id,
-                    "type": resource.type,
-                    "resource_group": resource.id.split("/resourceGroups/")[1].split("/")[0] if "/resourceGroups/" in resource.id else None,
-                    "location": resource.location,
-                    "tags": resource.tags or {},
-                    "subscription_name": sub_name,
-                })
-        except Exception as e:
-            errors.append({"subscription": sub_name, "error": str(e)[:100]})
+        results = []
+        for resource in resources:
+            results.append({
+                "name": resource.name,
+                "resource_id": resource.id,
+                "type": resource.type,
+                "resource_group": resource.id.split("/resourceGroups/")[1].split("/")[0] if "/resourceGroups/" in resource.id else None,
+                "location": resource.location,
+                "tags": resource.tags or {},
+                "subscription_name": sub_name,
+            })
+        return results
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_list_sub_resources, sub_id): sub_id for sub_id in target_subs}
+        for future in futures:
+            sub_id = futures[future]
+            sub_name = SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8])
+            try:
+                results = future.result(timeout=45)
+                all_resources.extend(results)
+            except FuturesTimeoutError:
+                errors.append({"subscription": sub_name, "error": "Timed out after 45s"})
+            except Exception as e:
+                errors.append({"subscription": sub_name, "error": str(e)[:100]})
 
     return json.dumps({
         "query": {
@@ -868,3 +1078,276 @@ def _live_compare_costs(args: dict, state: dict) -> str:
         "all_changes": changes[:50],  # Limit to top 50 for response size
         "note": "Use insights to understand cost drivers. Investigate top_increases and top_new_resources for optimization opportunities.",
     }, default=str)
+
+
+_ROLE_DEFS_CACHE = {}
+
+
+def _get_role_definitions(auth_client, scope: str) -> dict:
+    """Fetch role definitions with caching (they rarely change)."""
+    if scope in _ROLE_DEFS_CACHE:
+        return _ROLE_DEFS_CACHE[scope]
+
+    role_defs = {}
+    for rd in auth_client.role_definitions.list(scope):
+        role_defs[rd.id] = rd.role_name
+    _ROLE_DEFS_CACHE[scope] = role_defs
+    return role_defs
+
+
+def _resolve_user_to_oid(filter_principal: str) -> tuple:
+    """Resolve an email/name to (object_id, display_name, upn). Returns (None,'','') on failure."""
+    import subprocess
+    az_cmd = os.path.join(AZ_CLI_PATH, "az.cmd")
+
+    for cmd_part in [
+        f'ad user show --id "{filter_principal}" --query "{{id:id, displayName:displayName, userPrincipalName:userPrincipalName}}"',
+        f'ad user list --filter "startswith(displayName,\'{filter_principal}\')" --query "[0].{{id:id, displayName:displayName, userPrincipalName:userPrincipalName}}"',
+        f'ad sp list --filter "displayName eq \'{filter_principal}\'" --query "[0].{{id:id, displayName:displayName, userPrincipalName:appId}}"',
+    ]:
+        try:
+            r = subprocess.run(
+                f'"{az_cmd}" {cmd_part} -o json',
+                capture_output=True, text=True, timeout=10, shell=True,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                data = json.loads(r.stdout.strip())
+                if data and data.get("id"):
+                    return data["id"], data.get("displayName", ""), data.get("userPrincipalName", "")
+        except Exception:
+            continue
+    return None, "", ""
+
+
+def _live_get_role_assignments(args: dict, state: dict) -> str:
+    """Get Azure RBAC role assignments for a subscription."""
+    filter_sub = args.get("filter_subscription")
+    filter_principal = args.get("filter_principal", "").strip()
+
+    if not filter_sub:
+        return json.dumps({"error": "filter_subscription is required"})
+
+    # Resolve subscription
+    target_sub = None
+    for sub_id in SUBSCRIPTION_IDS:
+        sub_name = SUBSCRIPTION_NAMES.get(sub_id, "")
+        if filter_sub.lower() in sub_name.lower() or filter_sub.lower() in sub_id.lower():
+            target_sub = sub_id
+            break
+
+    if not target_sub:
+        return json.dumps({
+            "error": f"Subscription '{filter_sub}' not found",
+            "available_subscriptions": [{"id": s, "name": SUBSCRIPTION_NAMES.get(s, "Unknown")} for s in SUBSCRIPTION_IDS],
+        })
+
+    cred = get_credential()
+    auth_client = AuthorizationManagementClient(cred, target_sub)
+    scope = f"/subscriptions/{target_sub}"
+
+    # Resolve user and fetch role defs in parallel
+    principal_oid, principal_display_name, principal_upn = None, "", ""
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        role_defs_future = executor.submit(_get_role_definitions, auth_client, scope)
+
+        if filter_principal:
+            user_future = executor.submit(_resolve_user_to_oid, filter_principal)
+            principal_oid, principal_display_name, principal_upn = user_future.result(timeout=12)
+            if not principal_oid:
+                return json.dumps({
+                    "error": f"Could not find user/principal '{filter_principal}' in Azure AD",
+                    "hint": "Verify the email address or display name is correct.",
+                })
+
+        try:
+            role_defs = role_defs_future.result(timeout=15)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to fetch role definitions: {str(e)[:100]}"})
+
+    # Fetch role assignments (server-side filtered when possible)
+    assignments = []
+    try:
+        if principal_oid:
+            ra_iter = auth_client.role_assignments.list_for_scope(scope, filter=f"principalId eq '{principal_oid}'")
+        else:
+            ra_iter = auth_client.role_assignments.list_for_scope(scope)
+
+        for ra in ra_iter:
+            role_name = role_defs.get(ra.role_definition_id, ra.role_definition_id.split("/")[-1])
+            principal_type = str(ra.principal_type) if hasattr(ra, "principal_type") else "Unknown"
+
+            assignment = {
+                "principal_id": ra.principal_id,
+                "principal_type": principal_type,
+                "role_name": role_name,
+                "scope": ra.scope,
+            }
+
+            if principal_oid and ra.principal_id == principal_oid:
+                assignment["display_name"] = principal_display_name
+                assignment["user_principal_name"] = principal_upn
+
+            assignments.append(assignment)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch role assignments: {str(e)[:150]}"})
+
+    # For unfiltered queries, skip slow name resolution — return types and IDs only
+    # The LLM can summarize counts by type without needing every name resolved
+
+    # Group by principal for readability
+    by_principal = {}
+    for a in assignments:
+        key = a.get("display_name") or a.get("user_principal_name") or a["principal_id"]
+        if key not in by_principal:
+            by_principal[key] = {
+                "principal_id": a["principal_id"],
+                "principal_type": a["principal_type"],
+                "display_name": a.get("display_name", ""),
+                "user_principal_name": a.get("user_principal_name", ""),
+                "roles": [],
+            }
+        by_principal[key]["roles"].append({
+            "role_name": a["role_name"],
+            "scope": a["scope"],
+        })
+
+    return json.dumps({
+        "subscription": SUBSCRIPTION_NAMES.get(target_sub, target_sub),
+        "subscription_id": target_sub,
+        "total_assignments": len(assignments),
+        "principals": list(by_principal.values()),
+        "summary": {
+            "users": sum(1 for a in by_principal.values() if a["principal_type"] == "User"),
+            "groups": sum(1 for a in by_principal.values() if a["principal_type"] == "Group"),
+            "service_principals": sum(1 for a in by_principal.values() if a["principal_type"] == "ServicePrincipal"),
+        },
+    }, default=str)
+
+
+# Roles that grant permission to assign other roles
+_ROLE_ADMIN_ROLES = {"Owner", "User Access Administrator", "Role Based Access Control Administrator"}
+
+
+def _get_signed_in_user() -> dict:
+    """Get the currently logged-in user's info."""
+    import subprocess
+    az_cmd = os.path.join(AZ_CLI_PATH, "az.cmd")
+    try:
+        r = subprocess.run(
+            f'"{az_cmd}" ad signed-in-user show --query "{{id:id, displayName:displayName, userPrincipalName:userPrincipalName}}" -o json',
+            capture_output=True, text=True, timeout=10, shell=True,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return json.loads(r.stdout.strip())
+    except Exception:
+        pass
+    return {}
+
+
+def _live_assign_role(args: dict, state: dict) -> str:
+    """Assign an Azure RBAC role after verifying the caller has permission."""
+    import subprocess
+
+    target_principal = args.get("target_principal", "").strip()
+    role_name = args.get("role_name", "").strip()
+    filter_sub = args.get("filter_subscription", "").strip()
+    custom_scope = args.get("scope", "").strip()
+
+    if not target_principal or not role_name or not filter_sub:
+        return json.dumps({"error": "target_principal, role_name, and filter_subscription are all required."})
+
+    # Resolve subscription
+    target_sub = None
+    for sub_id in SUBSCRIPTION_IDS:
+        sub_name = SUBSCRIPTION_NAMES.get(sub_id, "")
+        if filter_sub.lower() in sub_name.lower() or filter_sub.lower() in sub_id.lower():
+            target_sub = sub_id
+            break
+
+    if not target_sub:
+        return json.dumps({
+            "error": f"Subscription '{filter_sub}' not found",
+            "available_subscriptions": [{"id": s, "name": SUBSCRIPTION_NAMES.get(s, "Unknown")} for s in SUBSCRIPTION_IDS],
+        })
+
+    scope = custom_scope or f"/subscriptions/{target_sub}"
+    sub_display = SUBSCRIPTION_NAMES.get(target_sub, target_sub)
+    az_cmd = os.path.join(AZ_CLI_PATH, "az.cmd")
+
+    # Step 1: Get the currently logged-in user
+    signed_in_user = _get_signed_in_user()
+    if not signed_in_user or not signed_in_user.get("id"):
+        return json.dumps({"error": "Could not determine the currently logged-in user. Please ensure you are logged in via 'az login'."})
+
+    caller_oid = signed_in_user["id"]
+    caller_name = signed_in_user.get("displayName", "")
+    caller_upn = signed_in_user.get("userPrincipalName", "")
+
+    # Step 2: Check if the caller has permission to assign roles
+    cred = get_credential()
+    auth_client = AuthorizationManagementClient(cred, target_sub)
+    role_defs = _get_role_definitions(auth_client, f"/subscriptions/{target_sub}")
+
+    caller_roles = []
+    try:
+        for ra in auth_client.role_assignments.list_for_scope(
+            f"/subscriptions/{target_sub}", filter=f"principalId eq '{caller_oid}'"
+        ):
+            rn = role_defs.get(ra.role_definition_id, ra.role_definition_id.split("/")[-1])
+            caller_roles.append(rn)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to check your permissions: {str(e)[:100]}"})
+
+    has_permission = any(r in _ROLE_ADMIN_ROLES for r in caller_roles)
+
+    if not has_permission:
+        return json.dumps({
+            "status": "access_denied",
+            "message": f"You ({caller_upn}) do not have permission to assign roles in subscription '{sub_display}'.",
+            "your_current_roles": caller_roles,
+            "required_roles": list(_ROLE_ADMIN_ROLES),
+            "recommendation": "Contact a subscription Owner or User Access Administrator to request this permission.",
+        })
+
+    # Step 3: Resolve the target principal
+    target_oid, target_display, target_upn = _resolve_user_to_oid(target_principal)
+    if not target_oid:
+        return json.dumps({
+            "error": f"Could not find user/principal '{target_principal}' in Azure AD.",
+            "hint": "Verify the email address or display name is correct.",
+        })
+
+    # Step 4: Execute the role assignment
+    try:
+        r = subprocess.run(
+            f'"{az_cmd}" role assignment create --assignee-object-id "{target_oid}" --assignee-principal-type "User" --role "{role_name}" --scope "{scope}" -o json',
+            capture_output=True, text=True, timeout=30, shell=True,
+        )
+        if r.returncode == 0:
+            result_data = json.loads(r.stdout) if r.stdout.strip() else {}
+            return json.dumps({
+                "status": "success",
+                "message": f"Role '{role_name}' successfully assigned to '{target_display or target_principal}' ({target_upn}) in subscription '{sub_display}'.",
+                "details": {
+                    "assigned_by": caller_upn,
+                    "target_user": target_upn or target_principal,
+                    "role": role_name,
+                    "scope": scope,
+                    "subscription": sub_display,
+                },
+            })
+        else:
+            error_msg = r.stderr.strip() if r.stderr else "Unknown error"
+            if "already exists" in error_msg.lower() or "RoleAssignmentExists" in error_msg:
+                return json.dumps({
+                    "status": "already_exists",
+                    "message": f"User '{target_display or target_principal}' already has the role '{role_name}' in subscription '{sub_display}'.",
+                })
+            return json.dumps({
+                "status": "failed",
+                "error": f"Role assignment failed: {error_msg[:200]}",
+                "hint": "Check that the role name is valid. Common roles: Reader, Contributor, Owner, Storage Blob Data Reader, Key Vault Secrets Officer.",
+            })
+    except Exception as e:
+        return json.dumps({"error": f"Failed to execute role assignment: {str(e)[:150]}"})

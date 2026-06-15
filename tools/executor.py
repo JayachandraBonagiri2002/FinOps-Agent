@@ -32,6 +32,8 @@ def execute_tool(tool_name: str, arguments: dict, session_state: dict = None) ->
         "get_optimization_recommendations": _get_optimization_recommendations,
         "compare_costs": _compare_costs,
         "list_resources": _list_resources,
+        "get_role_assignments": _get_role_assignments,
+        "assign_role": _assign_role,
     }
 
     handler = handlers.get(tool_name)
@@ -697,3 +699,19 @@ def _compare_costs(args: dict, state: dict) -> str:
         "top_new_resources": new_resources[:5],
         "all_changes": changes[:50],
     }, default=str)
+
+
+def _get_role_assignments(args: dict, state: dict) -> str:
+    """Demo mode: return a message directing to live mode for role assignments."""
+    return json.dumps({
+        "note": "get_role_assignments is only available in live mode (AZURE_SUBSCRIPTION_ID set in .env). In demo mode, role assignment queries cannot be processed.",
+        "hint": "Set AZURE_SUBSCRIPTION_ID in your .env file and ensure azure-mgmt-authorization package is installed to enable role assignment queries.",
+    })
+
+
+def _assign_role(args: dict, state: dict) -> str:
+    """Demo mode: return a message directing to live mode for role assignment."""
+    return json.dumps({
+        "note": "assign_role is only available in live mode (AZURE_SUBSCRIPTION_ID set in .env).",
+        "hint": "Set AZURE_SUBSCRIPTION_ID in your .env file and ensure azure-mgmt-authorization package is installed.",
+    })

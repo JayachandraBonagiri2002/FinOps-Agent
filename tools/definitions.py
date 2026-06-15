@@ -284,5 +284,55 @@ FINOPS_TOOLS = [
                 "required": ["resource_type"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_role_assignments",
+            "description": "Get Azure RBAC role assignments for a subscription. Shows who (users, groups, service principals) has what permissions (Owner, Contributor, Reader, custom roles). Use to answer questions like 'what roles do I have', 'who has access to this subscription', 'list permissions in STAGE'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter_subscription": {
+                        "type": "string",
+                        "description": "Azure subscription name (e.g., 'ABB-APP-NMG-STAGE') or ID to check role assignments for. Required."
+                    },
+                    "filter_principal": {
+                        "type": "string",
+                        "description": "Optional: filter by user email, display name, or service principal name to see only their role assignments."
+                    }
+                },
+                "required": ["filter_subscription"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_role",
+            "description": "Assign an Azure RBAC role to a user, group, or service principal in a subscription. Before assigning, this tool automatically checks whether the currently logged-in user has permission to assign roles (Owner or User Access Administrator). If they don't have permission, it returns an access denied error. Use when a user says 'assign role', 'grant access', 'give permissions to', etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_principal": {
+                        "type": "string",
+                        "description": "The user email, display name, or service principal to assign the role to (e.g., 'user@company.com')."
+                    },
+                    "role_name": {
+                        "type": "string",
+                        "description": "The Azure role to assign (e.g., 'Reader', 'Contributor', 'Owner', 'Storage Blob Data Reader', 'Key Vault Secrets Officer'). Use standard Azure built-in role names."
+                    },
+                    "filter_subscription": {
+                        "type": "string",
+                        "description": "The subscription name or ID where the role should be assigned (e.g., 'ABB-APP-NMG-STAGE')."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Optional: more specific scope for the assignment (e.g., a resource group path '/subscriptions/.../resourceGroups/myRG'). Defaults to subscription-level scope if not provided."
+                    }
+                },
+                "required": ["target_principal", "role_name", "filter_subscription"]
+            }
+        }
     }
 ]

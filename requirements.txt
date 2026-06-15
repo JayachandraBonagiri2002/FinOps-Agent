@@ -11,3 +11,4 @@ azure-mgmt-monitor>=6.0.0
 azure-mgmt-network>=25.0.0
 azure-mgmt-storage>=21.0.0
 azure-mgmt-resourcegraph>=8.0.0
+azure-mgmt-authorization>=4.0.0
