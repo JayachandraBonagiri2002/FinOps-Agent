@@ -38,7 +38,7 @@ export default function Dashboard() {
         <p className="text-gray-400 text-sm">Unable to load dashboard</p>
         <button
           onClick={fetchData}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-300 bg-[#111111] border border-[#1f1f1f] rounded-lg hover:border-[#2a2a2a] transition-colors"
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-300 bg-[#151515] border border-[#2a2a2a] rounded-lg hover:border-[#3a3a3a] transition-colors"
         >
           <RefreshCw size={14} />
           Retry
@@ -96,13 +96,13 @@ export default function Dashboard() {
                     <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
                 <XAxis dataKey="date" stroke="#333" tick={{ fill: '#666', fontSize: 11 }}
                   tickFormatter={(v) => v.slice(5)} />
                 <YAxis stroke="#333" tick={{ fill: '#666', fontSize: 11 }}
                   tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
                 <Tooltip
-                  contentStyle={{ background: '#111111', border: '1px solid #1f1f1f', borderRadius: 8 }}
+                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
                   labelStyle={{ color: '#888' }}
                   formatter={(v) => [`₹${Math.round(v).toLocaleString('en-IN')}`, 'Cost']}
                 />
@@ -128,7 +128,7 @@ export default function Dashboard() {
                   ))}
                 </Pie>
                 <Tooltip
-                  contentStyle={{ background: '#111111', border: '1px solid #1f1f1f', borderRadius: 8 }}
+                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
                   formatter={(v) => [`₹${Math.round(v).toLocaleString('en-IN')}`, 'Cost']}
                 />
               </PieChart>
@@ -141,13 +141,13 @@ export default function Dashboard() {
           <ChartCard title="Cost by Resource">
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={(by_resource || []).slice(0, 8)} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
                 <XAxis type="number" stroke="#333" tick={{ fill: '#666', fontSize: 11 }}
                   tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
                 <YAxis type="category" dataKey="resource" stroke="#333"
                   tick={{ fill: '#666', fontSize: 11 }} width={140} />
                 <Tooltip
-                  contentStyle={{ background: '#111111', border: '1px solid #1f1f1f', borderRadius: 8 }}
+                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
                   formatter={(v) => [`₹${Math.round(v).toLocaleString('en-IN')}`, 'Cost']}
                 />
                 <Bar dataKey="cost" fill="#3b82f6" radius={[0, 4, 4, 0]} />
@@ -158,11 +158,11 @@ export default function Dashboard() {
           <ChartCard title="Usage Hours — Dev/Staging (Avg)">
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={usage_hours || []}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
                 <XAxis dataKey="resource" stroke="#333" tick={{ fill: '#666', fontSize: 10 }} />
                 <YAxis stroke="#333" tick={{ fill: '#666', fontSize: 11 }} />
                 <Tooltip
-                  contentStyle={{ background: '#111111', border: '1px solid #1f1f1f', borderRadius: 8 }}
+                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
                   formatter={(v) => [`${v.toFixed(1)} hrs`, 'Avg Usage']}
                 />
                 <Bar dataKey="hours" fill="#f59e0b" radius={[4, 4, 0, 0]} />
@@ -172,14 +172,14 @@ export default function Dashboard() {
         </div>
 
         {/* Week-over-Week Table */}
-        <div className="bg-[#111111] rounded-xl border border-[#1f1f1f] overflow-hidden">
-          <div className="px-5 py-3 border-b border-[#1f1f1f]">
+        <div className="bg-[#151515] rounded-xl border border-[#2a2a2a] overflow-hidden">
+          <div className="px-5 py-3 border-b border-[#2a2a2a]">
             <h3 className="text-white font-semibold text-sm">Week-over-Week Comparison</h3>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="bg-[#111111]">
+                <tr className="bg-[#1a1a1a]">
                   <th className="text-left px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">Resource</th>
                   <th className="text-right px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">This Week</th>
                   <th className="text-right px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">Last Week</th>
@@ -190,8 +190,8 @@ export default function Dashboard() {
                 {(comparison || []).map((row, i) => (
                   <tr
                     key={i}
-                    className={`border-t border-[#1f1f1f] hover:bg-[#1a1a1a] transition-colors ${
-                      i % 2 === 0 ? 'bg-transparent' : 'bg-[#0d0d0d]'
+                    className={`border-t border-[#222] hover:bg-[#1a1a1a] transition-colors ${
+                      i % 2 === 0 ? 'bg-[#151515]' : 'bg-[#111]'
                     }`}
                   >
                     <td className="px-5 py-3 text-gray-300 font-mono text-xs">{row.resource}</td>
@@ -215,11 +215,11 @@ export default function Dashboard() {
 
 function KpiCard({ title, value, subtitle, icon: Icon, trend, accent }) {
   return (
-    <div className="bg-[#111111] rounded-xl border border-[#1f1f1f] p-5 hover:border-[#2a2a2a] transition-colors">
+    <div className="bg-[#151515] rounded-xl border border-[#2a2a2a] p-5 hover:border-[#3a3a3a] transition-colors">
       <div className="flex items-center justify-between mb-3">
-        <span className="text-xs text-gray-500 uppercase tracking-wider font-medium">{title}</span>
+        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">{title}</span>
         <div className={`p-2 rounded-lg ${accent === 'green' ? 'bg-emerald-500/10' : 'bg-white/5'}`}>
-          <Icon size={16} className={accent === 'green' ? 'text-emerald-400' : 'text-gray-500'} />
+          <Icon size={16} className={accent === 'green' ? 'text-emerald-400' : 'text-gray-400'} />
         </div>
       </div>
       <div className="text-2xl font-bold text-white">{value}</div>
@@ -234,7 +234,7 @@ function KpiCard({ title, value, subtitle, icon: Icon, trend, accent }) {
 
 function ChartCard({ title, children }) {
   return (
-    <div className="bg-[#111111] rounded-xl border border-[#1f1f1f] p-5 hover:border-[#2a2a2a] transition-colors">
+    <div className="bg-[#151515] rounded-xl border border-[#2a2a2a] p-5 hover:border-[#3a3a3a] transition-colors">
       <h3 className="text-sm font-semibold text-gray-300 mb-4">{title}</h3>
       {children}
     </div>
