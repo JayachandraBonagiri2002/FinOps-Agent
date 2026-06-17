@@ -156,15 +156,20 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
 
     iterations = 0
     tool_calls_log = []
+    start_time = time.time()
+    MAX_TOTAL_TIME = 120  # Hard cap: 2 minutes for the entire conversation turn
 
     while iterations < max_iterations:
         iterations += 1
 
-        if iterations > 1:
-            time.sleep(1)
+        if time.time() - start_time > MAX_TOTAL_TIME:
+            return "I'm sorry, the request took too long due to Azure API delays. Please try again in a moment.", tool_calls_log
 
-        max_retries = 5
-        base_delay = 10
+        if iterations > 1:
+            time.sleep(0.5)
+
+        max_retries = 3
+        base_delay = 5
 
         for retry in range(max_retries):
             try:
@@ -181,7 +186,7 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
                 if retry < max_retries - 1:
                     retry_after = _get_retry_after(e)
                     wait_time = max(retry_after, base_delay * (2 ** retry))
-                    wait_time = min(wait_time, 120)
+                    wait_time = min(wait_time, 30)
                     print(f"Rate limit hit. Waiting {wait_time}s before retry {retry + 1}/{max_retries}...")
                     time.sleep(wait_time)
                 else:
@@ -198,12 +203,15 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
         cost_api_tools = {"query_cost_data", "compare_costs", "detect_anomalies", "get_cost_trend", "generate_savings_report"}
 
         for i, tool_call in enumerate(message.tool_calls):
+            if time.time() - start_time > MAX_TOTAL_TIME:
+                return "I'm sorry, the request took too long due to Azure API delays. Please try again in a moment.", tool_calls_log
+
             fn_name = tool_call.function.name
             fn_args = json.loads(tool_call.function.arguments)
 
             # Stagger calls to cost-heavy tools to avoid Azure 429 rate limits
             if i > 0 and fn_name in cost_api_tools:
-                time.sleep(2)
+                time.sleep(1)
 
             tool_calls_log.append({
                 "iteration": iterations,

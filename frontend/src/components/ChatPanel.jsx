@@ -1,210 +1,298 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Send,
-  Scan,
-  TrendingUp,
-  Trash2,
-  Lightbulb,
-  Wrench,
-  ChevronDown,
-  ChevronRight,
-  Bot,
-  CircleStop,
-  RotateCcw,
+  Send, Scan, TrendingUp, Trash2, Lightbulb,
+  ChevronDown, ChevronRight, Wrench, Bot, User,
+  Sparkles, ArrowUp
 } from 'lucide-react'
+import clsx from 'clsx'
 
-export default function ChatPanel() {
+const quickActions = [
+  { icon: Scan, label: 'Full Scan', message: 'Run a comprehensive FinOps scan across all my subscriptions' },
+  { icon: TrendingUp, label: 'Cost Trends', message: 'Show me cost trends for the past month with week-over-week comparison' },
+  { icon: Trash2, label: 'Find Waste', message: 'Detect anomalies and find wasted resources I can clean up' },
+  { icon: Lightbulb, label: 'Optimize', message: 'Give me optimization recommendations to reduce my Azure spend' },
+]
+
+function TypingIndicator() {
+  return (
+    <div className="flex items-center gap-1.5 px-1 py-2">
+      {[0, 1, 2].map(i => (
+        <motion.div
+          key={i}
+          className="w-2 h-2 rounded-full bg-accent"
+          animate={{ y: [0, -5, 0], opacity: [0.4, 1, 0.4] }}
+          transition={{ duration: 0.9, repeat: Infinity, delay: i * 0.2 }}
+        />
+      ))}
+    </div>
+  )
+}
+
+function ToolCallsAccordion({ toolCalls }) {
+  const [open, setOpen] = useState(false)
+  if (!toolCalls || toolCalls.length === 0) return null
+
+  return (
+    <div className="mt-3 pt-3 border-t border-border-subtle">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-xs text-text-muted hover:text-text-secondary transition-colors"
+      >
+        <Wrench size={12} />
+        <span>{toolCalls.length} tool{toolCalls.length > 1 ? 's' : ''} used</span>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-2 space-y-1.5 pl-2 border-l-2 border-accent/30 ml-1">
+              {toolCalls.map((tc, i) => (
+                <div key={i} className="pl-3 py-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-accent font-medium">{tc.tool}</span>
+                    <span className="text-[10px] text-text-muted bg-surface-3 px-1.5 py-0.5 rounded">step {tc.iteration}</span>
+                  </div>
+                  {tc.arguments && Object.keys(tc.arguments).length > 0 && (
+                    <div className="text-[11px] text-text-muted font-mono mt-1 break-all leading-relaxed">
+                      {JSON.stringify(tc.arguments).slice(0, 120)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function MessageBubble({ message, isLast }) {
+  const isUser = message.role === 'user'
+
+  return (
+    <motion.div
+      initial={isLast ? { opacity: 0, y: 8 } : false}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="w-full"
+    >
+      <div className={clsx(
+        "flex gap-3 w-full",
+        isUser ? "flex-row-reverse" : ""
+      )}>
+        {/* Avatar */}
+        <div className={clsx(
+          "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1",
+          isUser ? "bg-accent/20" : "bg-surface-3"
+        )}>
+          {isUser ? <User size={15} className="text-accent" /> : <Bot size={15} className="text-text-secondary" />}
+        </div>
+
+        {/* Message content */}
+        <div className={clsx(
+          "min-w-0 rounded-2xl px-4 py-3 max-w-full",
+          isUser
+            ? "bg-accent/10 border border-accent/20 ml-12"
+            : "bg-surface-1 border border-border-subtle mr-12"
+        )}>
+          {isUser ? (
+            <p className="text-sm text-text-primary leading-relaxed whitespace-pre-wrap">{message.content}</p>
+          ) : (
+            <div className="message-content text-text-secondary">
+              <ReactMarkdown>{message.content}</ReactMarkdown>
+            </div>
+          )}
+          {!isUser && message.tool_calls && (
+            <ToolCallsAccordion toolCalls={message.tool_calls} />
+          )}
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
+const ChatPanel = forwardRef(function ChatPanel(props, ref) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [expandedTools, setExpandedTools] = useState({})
-  const messagesEndRef = useRef(null)
+  const [error, setError] = useState(null)
+  const scrollRef = useRef(null)
   const inputRef = useRef(null)
 
+  useImperativeHandle(ref, () => ({
+    resetChat() {
+      setMessages([])
+      setInput('')
+      setError(null)
+      setLoading(false)
+      fetch('/api/conversation/reset', { method: 'POST' }).catch(() => {})
+    }
+  }))
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
   }, [messages, loading])
 
-  useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
+  const sendMessage = useCallback(async (text) => {
+    const msg = text || input.trim()
+    if (!msg || loading) return
 
-  const sendMessage = async (text) => {
-    if (!text.trim() || loading) return
-    const userMsg = { role: 'user', content: text }
-    setMessages(prev => [...prev, userMsg])
     setInput('')
+    setError(null)
+    setMessages(prev => [...prev, { role: 'user', content: msg }])
     setLoading(true)
-    if (inputRef.current) inputRef.current.style.height = '44px'
 
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: msg }),
       })
+
       if (res.status === 429) {
-        setMessages(prev => [...prev, { role: 'assistant', content: 'Rate limit exceeded. Please wait a moment and try again.', tool_calls: [] }])
-      } else if (!res.ok) {
-        const err = await res.json()
-        setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.detail || 'Something went wrong'}`, tool_calls: [] }])
-      } else {
-        const data = await res.json()
-        setMessages(prev => [...prev, { role: 'assistant', content: data.response, tool_calls: data.tool_calls || [], reasoning_steps: data.reasoning_steps }])
+        setError('Azure APIs are rate-limited. Please wait 30 seconds and try again.')
+        setLoading(false)
+        return
       }
-    } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Failed to connect to the backend. Make sure the API server is running.', tool_calls: [] }])
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}))
+        throw new Error(errData.detail || `Server error (${res.status})`)
+      }
+
+      const data = await res.json()
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: data.response,
+        tool_calls: data.tool_calls,
+        reasoning_steps: data.reasoning_steps,
+      }])
+    } catch (e) {
+      setError(e.message || 'Failed to connect to backend.')
     } finally {
       setLoading(false)
     }
-  }
+  }, [input, loading])
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      sendMessage(input)
+      sendMessage()
     }
   }
 
-  const handleNewChat = () => {
-    fetch('/api/conversation/reset', { method: 'POST' })
-    setMessages([])
-    setExpandedTools({})
-  }
-
-  const quickActions = [
-    { icon: Scan, label: 'Full optimization scan', prompt: 'Run a full FinOps optimization scan across ALL subscriptions — detect all anomalies, check utilization, and recommend actions.' },
-    { icon: TrendingUp, label: 'Cost trends', prompt: 'Show me cost trends for the last 2 weeks. Which resources are increasing?' },
-    { icon: Trash2, label: 'Find waste', prompt: 'Find all orphaned, unused, or idle resources that are wasting money.' },
-    { icon: Lightbulb, label: 'Recommendations', prompt: 'Give me all optimization recommendations — right-sizing, scheduling, Reserved Instances, and cleanup.' },
-  ]
-
-  const toggleTools = (idx) => {
-    setExpandedTools(prev => ({ ...prev, [idx]: !prev[idx] }))
-  }
+  const isEmpty = messages.length === 0
 
   return (
-    <div className="absolute inset-0 flex flex-col">
-      {/* Scrollable area — takes all available space */}
-      <div className="flex-1 overflow-y-auto">
-        {messages.length === 0 ? (
-          <div className="h-full flex items-center justify-center p-4">
-            <div className="w-full max-w-[720px] text-center">
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 mb-6 shadow-lg shadow-emerald-500/20">
-                <Bot size={32} className="text-white" strokeWidth={1.5} />
+    <div className="h-full flex flex-col">
+      {/* Messages Area */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        {isEmpty ? (
+          <div className="h-full flex flex-col items-center justify-center px-4">
+            <div className="text-center w-full max-w-3xl">
+              <div className="w-16 h-16 rounded-3xl bg-accent/10 border border-accent/20 flex items-center justify-center mx-auto mb-6">
+                <Sparkles size={32} className="text-accent" />
               </div>
-              <h1 className="text-3xl font-semibold text-white mb-2">How can I help with your cloud costs?</h1>
-              <p className="text-[#888] mb-10 text-sm">Ask about Azure spend, resources, optimization, or run a scan.</p>
-              <div className="grid grid-cols-2 gap-3 max-w-[560px] mx-auto">
-                {quickActions.map((a, i) => (
-                  <button key={i} onClick={() => sendMessage(a.prompt)} className="flex items-center gap-3 px-4 py-3 rounded-xl border border-[#222] bg-[#111] hover:bg-[#1a1a1a] hover:border-[#333] transition-colors text-left group">
-                    <a.icon size={16} className="text-[#555] group-hover:text-emerald-400 transition-colors flex-shrink-0" />
-                    <span className="text-sm text-[#999] group-hover:text-[#ccc] transition-colors">{a.label}</span>
-                  </button>
-                ))}
+              <h1 className="text-3xl font-extrabold text-text-primary mb-3 tracking-tight">
+                FinOps Copilot
+              </h1>
+              <p className="text-text-secondary text-base mb-10 leading-relaxed max-w-lg mx-auto">
+                Ask me anything about your Azure costs, resources, and optimizations.
+                <br />Connected to your live Azure environment.
+              </p>
+              <div className="grid grid-cols-2 gap-4 max-w-2xl mx-auto">
+                {quickActions.map((action) => {
+                  const Icon = action.icon
+                  return (
+                    <button
+                      key={action.label}
+                      onClick={() => sendMessage(action.message)}
+                      className="flex items-center gap-3 p-4 rounded-2xl border border-border bg-surface-1 hover:bg-surface-2 hover:border-accent/40 hover:shadow-lg hover:shadow-accent/5 transition-all duration-200 text-left group"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-surface-3 flex items-center justify-center shrink-0 group-hover:bg-accent/10 group-hover:text-accent transition-colors">
+                        <Icon size={18} className="text-text-muted group-hover:text-accent transition-colors" />
+                      </div>
+                      <div>
+                        <span className="block text-sm font-semibold text-text-secondary group-hover:text-text-primary transition-colors">{action.label}</span>
+                        <span className="block text-[11px] text-text-muted mt-0.5 line-clamp-1">{action.message}</span>
+                      </div>
+                    </button>
+                  )
+                })}
               </div>
             </div>
           </div>
         ) : (
-          <div className="max-w-[720px] mx-auto px-4 py-6">
-            {messages.map((msg, idx) => (
-              <div key={idx} className="mb-5">
-                {msg.role === 'user' ? (
-                  <div className="flex justify-end">
-                    <div className="max-w-[85%] bg-[#1a1a1a] border border-[#222] rounded-2xl rounded-br-md px-4 py-2.5">
-                      <p className="text-[14px] text-white leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex gap-3">
-                    <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center mt-0.5">
-                      <Bot size={14} className="text-white" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="message-content text-[14px] text-[#ccc] leading-relaxed">
-                        <ReactMarkdown>{msg.content}</ReactMarkdown>
-                      </div>
-                      {msg.tool_calls && msg.tool_calls.length > 0 && (
-                        <div className="mt-3">
-                          <button onClick={() => toggleTools(idx)} className="flex items-center gap-1.5 text-xs text-[#555] hover:text-[#888] transition-colors">
-                            {expandedTools[idx] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                            <Wrench size={11} />
-                            <span>{msg.tool_calls.length} tool{msg.tool_calls.length > 1 ? 's' : ''}{msg.reasoning_steps ? ` • ${msg.reasoning_steps} steps` : ''}</span>
-                          </button>
-                          {expandedTools[idx] && (
-                            <div className="mt-2 space-y-0.5 bg-[#0d0d0d] rounded-lg p-2 border border-[#1a1a1a] text-xs">
-                              {msg.tool_calls.map((tc, tIdx) => (
-                                <div key={tIdx} className="flex items-start gap-2 py-1 px-1.5">
-                                  <span className="text-emerald-600 font-mono text-[10px] bg-emerald-500/10 px-1 py-0.5 rounded">{tc.iteration}</span>
-                                  <span className="text-[#888] font-mono truncate">{tc.tool}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
+          <div className="px-4 sm:px-6 lg:px-8 py-8 space-y-8 max-w-4xl mx-auto pb-6">
+            {messages.map((msg, i) => (
+              <MessageBubble key={i} message={msg} isLast={i === messages.length - 1} />
             ))}
             {loading && (
-              <div className="flex gap-3 mb-5">
-                <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center">
-                  <Bot size={14} className="text-white" />
+              <div className="flex gap-3">
+                <div className="w-8 h-8 rounded-full bg-surface-3 flex items-center justify-center shrink-0">
+                  <Bot size={15} className="text-text-secondary" />
                 </div>
-                <div className="flex items-center gap-2 py-1">
-                  <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 bg-[#555] rounded-full animate-[bounce_1.4s_infinite_0ms]"></div>
-                    <div className="w-1.5 h-1.5 bg-[#555] rounded-full animate-[bounce_1.4s_infinite_200ms]"></div>
-                    <div className="w-1.5 h-1.5 bg-[#555] rounded-full animate-[bounce_1.4s_infinite_400ms]"></div>
-                  </div>
-                  <span className="text-xs text-[#555]">Thinking...</span>
-                </div>
+                <TypingIndicator />
               </div>
             )}
-            <div ref={messagesEndRef} />
+            {error && (
+              <div className="bg-danger/10 border border-danger/20 rounded-xl px-4 py-3 text-sm text-danger">
+                {error}
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Input area — fixed at bottom */}
-      <div className="flex-shrink-0 border-t border-[#1a1a1a] bg-[#0a0a0a] px-4 py-3">
-        <div className="max-w-[720px] mx-auto">
-          {messages.length > 0 && (
-            <div className="flex justify-end mb-2">
-              <button onClick={handleNewChat} className="flex items-center gap-1.5 text-[11px] text-[#555] hover:text-[#888] transition-colors">
-                <RotateCcw size={11} />
-                New chat
-              </button>
-            </div>
-          )}
-          <div className="relative flex items-end bg-[#111] border border-[#222] rounded-2xl focus-within:border-[#333] transition-colors">
+      {/* Input Area */}
+      <div className="relative shrink-0 border-t border-border-subtle glass-panel px-4 sm:px-6 lg:px-8 py-5 z-20 w-full">
+        <div className="max-w-4xl mx-auto">
+          <div className="relative flex items-end gap-3 bg-surface-1/90 border border-border rounded-2xl px-4 py-3 focus-within:border-accent focus-within:shadow-[0_0_15px_rgba(96,165,250,0.15)] transition-all duration-300">
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message FinOps Copilot..."
+              placeholder="Ask about costs, resources, or optimizations..."
               rows={1}
-              className="flex-1 bg-transparent text-white text-[14px] pl-4 pr-12 py-3 resize-none outline-none placeholder-[#555] max-h-[120px] rounded-2xl"
-              style={{ minHeight: '44px' }}
+              className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-muted outline-none resize-none max-h-[140px] leading-relaxed"
+              style={{ minHeight: '24px' }}
               onInput={(e) => {
                 e.target.style.height = 'auto'
-                e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+                e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px'
               }}
             />
             <button
-              onClick={() => sendMessage(input)}
+              onClick={() => sendMessage()}
               disabled={!input.trim() || loading}
-              className="absolute right-2 bottom-2 p-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-[#222] disabled:text-[#555] disabled:cursor-not-allowed transition-colors"
+              className={clsx(
+                "shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-150",
+                input.trim() && !loading
+                  ? "bg-accent text-white hover:bg-accent/80 active:scale-95"
+                  : "bg-surface-3 text-text-muted cursor-not-allowed"
+              )}
             >
-              {loading ? <CircleStop size={16} /> : <Send size={16} />}
+              <ArrowUp size={16} />
             </button>
           </div>
+          <p className="text-[11px] text-text-muted text-center mt-2 opacity-60">
+            Connected to live Azure APIs &bull; Results are real-time
+          </p>
         </div>
       </div>
     </div>
   )
-}
+})
+
+export default ChatPanel

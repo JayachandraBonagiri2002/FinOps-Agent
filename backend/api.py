@@ -108,8 +108,8 @@ def chat(req: ChatRequest):
     except Exception as e:
         error_msg = str(e)
         if "429" in error_msg or "rate" in error_msg.lower():
-            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment and try again.")
-        raise HTTPException(status_code=500, detail=error_msg)
+            raise HTTPException(status_code=429, detail="Azure APIs are rate-limited right now. Please wait 30 seconds and try again.")
+        raise HTTPException(status_code=500, detail=f"Something went wrong: {error_msg[:200]}")
 
 
 @app.post("/api/scan")

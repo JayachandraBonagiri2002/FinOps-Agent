@@ -1,242 +1,288 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts'
-import { TrendingUp, TrendingDown, Server, IndianRupee, Loader2, RefreshCw } from 'lucide-react'
+import { motion } from 'framer-motion'
+import {
+  TrendingUp, IndianRupee, Server,
+  PiggyBank, RefreshCw, AlertCircle, ArrowUpRight, ArrowDownRight
+} from 'lucide-react'
+import clsx from 'clsx'
 
-const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4']
+const CHART_COLORS = ['#58a6ff', '#3fb950', '#d29922', '#f85149', '#a371f7', '#79c0ff', '#56d364', '#e3b341']
+
+function fmt(val) {
+  if (val == null || isNaN(val)) return '₹0'
+  if (val >= 100000) return `₹${(val / 100000).toFixed(1)}L`
+  if (val >= 1000) return `₹${(val / 1000).toFixed(1)}K`
+  return `₹${Math.round(val)}`
+}
+
+function fmtDate(str) {
+  if (!str) return ''
+  const d = new Date(str)
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+}
+
+function KPICard({ title, value, change, icon: Icon, accent }) {
+  const up = change > 0
+  return (
+    <div className="bg-surface-1 border border-border-subtle rounded-xl p-4 flex flex-col justify-between min-h-[110px] hover:border-border transition-colors">
+      <div className="flex items-center justify-between">
+        <div className={clsx("w-9 h-9 rounded-lg flex items-center justify-center", accent)}>
+          <Icon size={18} />
+        </div>
+        {change != null && change !== 0 && (
+          <span className={clsx(
+            "flex items-center gap-0.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-md",
+            up ? "bg-danger/10 text-danger" : "bg-success/10 text-success"
+          )}>
+            {up ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+            {Math.abs(change).toFixed(1)}%
+          </span>
+        )}
+      </div>
+      <div className="mt-2">
+        <p className="text-xl font-bold text-text-primary tracking-tight leading-none">{value}</p>
+        <p className="text-[11px] text-text-muted mt-1">{title}</p>
+      </div>
+    </div>
+  )
+}
+
+function CustomTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null
+  return (
+    <div className="bg-surface-2 border border-border rounded-lg px-3 py-2 shadow-xl text-xs">
+      <p className="text-text-muted mb-0.5">{fmtDate(label) || label}</p>
+      {payload.map((e, i) => (
+        <p key={i} className="font-semibold text-text-primary">{fmt(e.value)}</p>
+      ))}
+    </div>
+  )
+}
+
+function Skeleton() {
+  return (
+    <div className="p-5 space-y-5">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="bg-surface-1 border border-border-subtle rounded-xl p-4 h-[110px]">
+            <div className="w-9 h-9 rounded-lg animate-shimmer mb-2" />
+            <div className="h-6 w-20 rounded animate-shimmer mb-1" />
+            <div className="h-3 w-14 rounded animate-shimmer" />
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <div className="lg:col-span-2 bg-surface-1 border border-border-subtle rounded-xl p-4 h-64">
+          <div className="h-4 w-36 rounded animate-shimmer mb-4" />
+          <div className="h-48 w-full rounded-lg animate-shimmer" />
+        </div>
+        <div className="bg-surface-1 border border-border-subtle rounded-xl p-4 h-64">
+          <div className="h-4 w-24 rounded animate-shimmer mb-4" />
+          <div className="h-48 w-full rounded-lg animate-shimmer" />
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function Dashboard() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(false)
+  const [error, setError] = useState(null)
+  const [refreshing, setRefreshing] = useState(false)
 
-  const fetchData = () => {
-    setLoading(true)
-    setError(false)
-    fetch('/api/dashboard')
-      .then(r => r.json())
-      .then(d => { setData(d); setError(false) })
-      .catch(() => setError(true))
-      .finally(() => setLoading(false))
-  }
+  const fetchData = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true)
+    else setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/dashboard')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setData(await res.json())
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
 
-  useEffect(() => { fetchData() }, [])
+  useEffect(() => { fetchData() }, [fetchData])
 
-  if (loading) {
+  if (loading) return <Skeleton />
+
+  if (error) {
     return (
-      <div className="flex-1 flex items-center justify-center min-h-[400px]">
-        <Loader2 className="animate-spin text-gray-500" size={32} />
+      <div className="h-full flex items-center justify-center p-6">
+        <div className="text-center">
+          <AlertCircle size={36} className="text-danger mx-auto mb-3" />
+          <p className="text-sm text-text-secondary mb-2">Failed to load dashboard</p>
+          <p className="text-xs text-text-muted mb-4">{error}</p>
+          <button onClick={() => fetchData()} className="px-4 py-2 rounded-lg bg-accent text-white text-sm hover:bg-accent/80 transition">
+            Retry
+          </button>
+        </div>
       </div>
     )
   }
 
-  if (error || !data) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center min-h-[400px] gap-4">
-        <p className="text-gray-400 text-sm">Unable to load dashboard</p>
+  if (!data) return null
+
+  const { kpis, daily_trend, by_environment, by_resource, comparison } = data
+
+  return (
+    <div className="p-4 sm:p-6 lg:p-8 xl:p-10 space-y-5 sm:space-y-6 w-full">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-text-primary tracking-tight">Cost Dashboard</h1>
+          <p className="text-[11px] text-text-muted mt-0.5">Real-time Azure cost analytics</p>
+        </div>
         <button
-          onClick={fetchData}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-300 bg-[#151515] border border-[#2a2a2a] rounded-lg hover:border-[#3a3a3a] transition-colors"
+          onClick={() => fetchData(true)}
+          disabled={refreshing}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary transition disabled:opacity-50"
         >
-          <RefreshCw size={14} />
-          Retry
+          <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
+          Refresh
         </button>
       </div>
-    )
-  }
 
-  const { kpis, daily_trend, by_environment, by_resource, usage_hours, comparison } = data
+      {/* KPIs - always fills the full row */}
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 xl:gap-4">
+        <KPICard title="Weekly Spend" value={fmt(kpis?.weekly_spend)} change={kpis?.change_pct} icon={IndianRupee} accent="bg-accent/15 text-accent" />
+        <KPICard title="Monthly Projection" value={fmt(kpis?.monthly_projection)} icon={TrendingUp} accent="bg-[#a371f7]/15 text-[#a371f7]" />
+        <KPICard title="Resources Tracked" value={kpis?.resources_tracked || 0} icon={Server} accent="bg-success/15 text-success" />
+        <KPICard title="Potential Savings" value={fmt(kpis?.potential_savings)} icon={PiggyBank} accent="bg-warning/15 text-warning" />
+      </div>
 
-  const emptyKpis = !kpis
-  const safeKpis = kpis || { weekly_spend: 0, change_pct: 0, monthly_projection: 0, resources_tracked: 0, potential_savings: 0 }
-
-  return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="w-full p-6">
-        {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <KpiCard
-            title="This Week Spend"
-            value={`₹${Math.round(safeKpis.weekly_spend).toLocaleString('en-IN')}`}
-            subtitle={emptyKpis ? 'No data' : `${safeKpis.change_pct > 0 ? '+' : ''}${safeKpis.change_pct}% vs last week`}
-            icon={IndianRupee}
-            trend={emptyKpis ? null : safeKpis.change_pct > 0 ? 'up' : 'down'}
-          />
-          <KpiCard
-            title="Monthly Projection"
-            value={`₹${Math.round(safeKpis.monthly_projection).toLocaleString('en-IN')}`}
-            subtitle={emptyKpis ? 'No data' : 'Based on current rate'}
-            icon={TrendingUp}
-          />
-          <KpiCard
-            title="Resources Tracked"
-            value={safeKpis.resources_tracked}
-            subtitle={emptyKpis ? 'No data' : 'Active resources'}
-            icon={Server}
-          />
-          <KpiCard
-            title="Potential Savings"
-            value={`₹${Math.round(safeKpis.potential_savings).toLocaleString('en-IN')}/mo`}
-            subtitle={emptyKpis ? 'No data' : 'Auto-shutdown + idle cleanup'}
-            icon={TrendingDown}
-            accent="green"
-          />
-        </div>
-
-        {/* Charts Row 1 */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-          <ChartCard title="Daily Cost Trend (3 Weeks)">
-            <ResponsiveContainer width="100%" height={280}>
-              <AreaChart data={daily_trend || []}>
+      {/* Row 1: Trend + Pie — spans full width */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 xl:gap-6">
+        {/* Area chart — takes 2/3 on xl */}
+        <div className="xl:col-span-2 bg-surface-1 border border-border-subtle rounded-xl p-5">
+          <h3 className="text-xs font-semibold text-text-primary mb-3">Daily Cost Trend (3 weeks)</h3>
+          <div className="h-56 xl:h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={daily_trend || []} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
                 <defs>
-                  <linearGradient id="colorCost" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                  <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#58a6ff" stopOpacity={0.25} />
+                    <stop offset="100%" stopColor="#58a6ff" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
-                <XAxis dataKey="date" stroke="#333" tick={{ fill: '#666', fontSize: 11 }}
-                  tickFormatter={(v) => v.slice(5)} />
-                <YAxis stroke="#333" tick={{ fill: '#666', fontSize: 11 }}
-                  tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
-                <Tooltip
-                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
-                  labelStyle={{ color: '#888' }}
-                  formatter={(v) => [`₹${Math.round(v).toLocaleString('en-IN')}`, 'Cost']}
-                />
-                <Area type="monotone" dataKey="cost" stroke="#10b981" fill="url(#colorCost)" strokeWidth={2} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#21262d" vertical={false} />
+                <XAxis dataKey="date" tickFormatter={fmtDate} tick={{ fill: '#6e7681', fontSize: 10 }} axisLine={{ stroke: '#21262d' }} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tickFormatter={fmt} tick={{ fill: '#6e7681', fontSize: 10 }} axisLine={false} tickLine={false} width={55} />
+                <Tooltip content={<CustomTooltip />} />
+                <Area type="monotone" dataKey="cost" stroke="#58a6ff" strokeWidth={2} fill="url(#areaGrad)" dot={false} activeDot={{ r: 3, fill: '#58a6ff', strokeWidth: 0 }} />
               </AreaChart>
             </ResponsiveContainer>
-          </ChartCard>
-
-          <ChartCard title="Cost by Environment">
-            <ResponsiveContainer width="100%" height={280}>
-              <PieChart>
-                <Pie
-                  data={by_environment || []}
-                  dataKey="cost"
-                  nameKey="environment"
-                  cx="50%" cy="50%"
-                  outerRadius={100}
-                  label={({ environment, percent }) => `${environment} ${(percent*100).toFixed(0)}%`}
-                  labelLine={{ stroke: '#444' }}
-                >
-                  {(by_environment || []).map((_, i) => (
-                    <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
-                  formatter={(v) => [`₹${Math.round(v).toLocaleString('en-IN')}`, 'Cost']}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </ChartCard>
-        </div>
-
-        {/* Charts Row 2 */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-          <ChartCard title="Cost by Resource">
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={(by_resource || []).slice(0, 8)} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
-                <XAxis type="number" stroke="#333" tick={{ fill: '#666', fontSize: 11 }}
-                  tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
-                <YAxis type="category" dataKey="resource" stroke="#333"
-                  tick={{ fill: '#666', fontSize: 11 }} width={140} />
-                <Tooltip
-                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
-                  formatter={(v) => [`₹${Math.round(v).toLocaleString('en-IN')}`, 'Cost']}
-                />
-                <Bar dataKey="cost" fill="#3b82f6" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartCard>
-
-          <ChartCard title="Usage Hours — Dev/Staging (Avg)">
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={usage_hours || []}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
-                <XAxis dataKey="resource" stroke="#333" tick={{ fill: '#666', fontSize: 10 }} />
-                <YAxis stroke="#333" tick={{ fill: '#666', fontSize: 11 }} />
-                <Tooltip
-                  contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 8 }}
-                  formatter={(v) => [`${v.toFixed(1)} hrs`, 'Avg Usage']}
-                />
-                <Bar dataKey="hours" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartCard>
-        </div>
-
-        {/* Week-over-Week Table */}
-        <div className="bg-[#151515] rounded-xl border border-[#2a2a2a] overflow-hidden">
-          <div className="px-5 py-3 border-b border-[#2a2a2a]">
-            <h3 className="text-white font-semibold text-sm">Week-over-Week Comparison</h3>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-[#1a1a1a]">
-                  <th className="text-left px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">Resource</th>
-                  <th className="text-right px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">This Week</th>
-                  <th className="text-right px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">Last Week</th>
-                  <th className="text-right px-5 py-3 text-gray-500 font-medium text-xs uppercase tracking-wide">Change</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(comparison || []).map((row, i) => (
-                  <tr
-                    key={i}
-                    className={`border-t border-[#222] hover:bg-[#1a1a1a] transition-colors ${
-                      i % 2 === 0 ? 'bg-[#151515]' : 'bg-[#111]'
-                    }`}
-                  >
-                    <td className="px-5 py-3 text-gray-300 font-mono text-xs">{row.resource}</td>
-                    <td className="px-5 py-3 text-right text-gray-300">₹{Math.round(row.this_week).toLocaleString('en-IN')}</td>
-                    <td className="px-5 py-3 text-right text-gray-400">₹{Math.round(row.last_week).toLocaleString('en-IN')}</td>
-                    <td className={`px-5 py-3 text-right font-medium ${
-                      row.change_pct > 0 ? 'text-red-400' : row.change_pct < 0 ? 'text-emerald-400' : 'text-gray-500'
-                    }`}>
-                      {row.change_pct > 0 ? '+' : ''}{row.change_pct}%
-                    </td>
+        </div>
+
+        {/* Pie — takes 1/3 on xl */}
+        <div className="bg-surface-1 border border-border-subtle rounded-xl p-5">
+          <h3 className="text-xs font-semibold text-text-primary mb-3">Cost by Service</h3>
+          <div className="h-48 xl:h-52">
+            {by_environment?.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={by_environment} dataKey="cost" nameKey="environment" cx="50%" cy="50%" outerRadius="75%" innerRadius="50%" paddingAngle={2} stroke="none">
+                    {by_environment.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip content={({ active, payload }) => {
+                    if (!active || !payload?.length) return null
+                    return (
+                      <div className="bg-surface-2 border border-border rounded-lg px-3 py-2 shadow-xl text-xs">
+                        <p className="text-text-muted">{payload[0].name}</p>
+                        <p className="font-semibold text-text-primary">{fmt(payload[0].value)}</p>
+                      </div>
+                    )
+                  }} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-text-muted text-xs">No data</div>
+            )}
+          </div>
+          {by_environment?.length > 0 && (
+            <div className="mt-3 grid grid-cols-2 gap-x-2 gap-y-1">
+              {by_environment.slice(0, 6).map((item, i) => (
+                <div key={i} className="flex items-center gap-1.5 min-w-0">
+                  <div className="w-2 h-2 rounded-full shrink-0" style={{ background: CHART_COLORS[i % CHART_COLORS.length] }} />
+                  <span className="text-[10px] text-text-muted truncate">{item.environment}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Row 2: Bar + Table — each takes half the full width */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 xl:gap-6">
+        <div className="bg-surface-1 border border-border-subtle rounded-xl p-5">
+          <h3 className="text-xs font-semibold text-text-primary mb-3">Top Resources by Cost</h3>
+          <div className="h-60 xl:h-72">
+            {by_resource?.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={by_resource.slice(0, 10)} layout="vertical" margin={{ top: 0, right: 10, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#21262d" horizontal={false} />
+                  <XAxis type="number" tickFormatter={fmt} tick={{ fill: '#6e7681', fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <YAxis type="category" dataKey="resource" tick={{ fill: '#8b949e', fontSize: 10 }} axisLine={false} tickLine={false} width={110} tickFormatter={v => v.length > 16 ? v.slice(0, 16) + '…' : v} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Bar dataKey="cost" fill="#58a6ff" radius={[0, 4, 4, 0]} barSize={16} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-text-muted text-xs">No resource data</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-surface-1 border border-border-subtle rounded-xl p-5">
+          <h3 className="text-xs font-semibold text-text-primary mb-3">Week-over-Week Comparison</h3>
+          <div className="h-60 xl:h-72 overflow-y-auto">
+            {comparison?.length > 0 ? (
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-surface-1 z-10">
+                  <tr className="border-b border-border">
+                    <th className="text-left text-text-muted font-medium py-2 pr-2">Resource</th>
+                    <th className="text-right text-text-muted font-medium py-2 px-1">This Week</th>
+                    <th className="text-right text-text-muted font-medium py-2 px-1">Last Week</th>
+                    <th className="text-right text-text-muted font-medium py-2 pl-1 w-16">Change</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {comparison.slice(0, 15).map((row, i) => {
+                    const ch = row.change_pct || 0
+                    return (
+                      <tr key={i} className="border-b border-border-subtle/50 hover:bg-surface-2/40 transition-colors">
+                        <td className="py-1.5 pr-2 text-text-secondary truncate max-w-[160px]">{row.resource}</td>
+                        <td className="py-1.5 px-1 text-right text-text-primary font-medium">{fmt(row.this_week || 0)}</td>
+                        <td className="py-1.5 px-1 text-right text-text-muted">{fmt(row.last_week || 0)}</td>
+                        <td className="py-1.5 pl-1 text-right">
+                          <span className={clsx(
+                            "font-semibold",
+                            ch > 5 ? "text-danger" : ch < -5 ? "text-success" : "text-text-muted"
+                          )}>
+                            {ch > 0 ? '+' : ''}{ch.toFixed(0)}%
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <div className="h-full flex items-center justify-center text-text-muted text-xs">No comparison data</div>
+            )}
           </div>
         </div>
       </div>
-    </div>
-  )
-}
-
-function KpiCard({ title, value, subtitle, icon: Icon, trend, accent }) {
-  return (
-    <div className="bg-[#151515] rounded-xl border border-[#2a2a2a] p-5 hover:border-[#3a3a3a] transition-colors">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">{title}</span>
-        <div className={`p-2 rounded-lg ${accent === 'green' ? 'bg-emerald-500/10' : 'bg-white/5'}`}>
-          <Icon size={16} className={accent === 'green' ? 'text-emerald-400' : 'text-gray-400'} />
-        </div>
-      </div>
-      <div className="text-2xl font-bold text-white">{value}</div>
-      <div className={`text-xs mt-2 font-medium ${
-        trend === 'up' ? 'text-red-400' : trend === 'down' ? 'text-emerald-400' : 'text-gray-500'
-      }`}>
-        {subtitle}
-      </div>
-    </div>
-  )
-}
-
-function ChartCard({ title, children }) {
-  return (
-    <div className="bg-[#151515] rounded-xl border border-[#2a2a2a] p-5 hover:border-[#3a3a3a] transition-colors">
-      <h3 className="text-sm font-semibold text-gray-300 mb-4">{title}</h3>
-      {children}
     </div>
   )
 }

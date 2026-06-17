@@ -152,38 +152,37 @@ def execute_tool_live(tool_name: str, arguments: dict, session_state: dict = Non
     if not handler:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(handler, arguments, session_state or {})
-                result = future.result(timeout=90)
+                result = future.result(timeout=45)
 
-            # Check if result is a rate-limit error and retry
+            # Check if result is a rate-limit error and retry once
             try:
                 parsed = json.loads(result)
                 if "error" in parsed and ("429" in str(parsed["error"]) or "Too many requests" in str(parsed["error"]) or "TooManyRequests" in str(parsed["error"])):
                     if attempt < max_retries - 1:
                         import time
-                        wait = 10 * (attempt + 1)
-                        time.sleep(wait)
+                        time.sleep(5)
                         continue
+                    return result
             except (json.JSONDecodeError, TypeError):
                 pass
 
             return result
         except FuturesTimeoutError:
-            return json.dumps({"error": f"Tool '{tool_name}' timed out after 90 seconds. Azure APIs may be slow — try a narrower query.", "tool": tool_name})
+            return json.dumps({"error": f"Tool '{tool_name}' timed out after 45 seconds. Azure APIs may be overloaded — try again shortly.", "tool": tool_name})
         except Exception as e:
             error_str = str(e)
             if ("429" in error_str or "TooManyRequests" in error_str) and attempt < max_retries - 1:
                 import time
-                wait = 10 * (attempt + 1)
-                time.sleep(wait)
+                time.sleep(5)
                 continue
             return json.dumps({"error": f"Azure API error: {error_str}", "tool": tool_name})
 
-    return json.dumps({"error": f"Tool '{tool_name}' failed after {max_retries} retries due to rate limiting. Please wait a minute and try again.", "tool": tool_name})
+    return json.dumps({"error": f"Tool '{tool_name}' failed due to rate limiting (Azure API overloaded). Please wait 30 seconds and try again.", "tool": tool_name})
 
 
 LIVE_PENDING_APPROVALS = []
@@ -281,13 +280,13 @@ def _live_query_cost_data(args: dict, state: dict) -> str:
             ),
         )
 
-        for retry in range(3):
+        for retry in range(2):
             try:
                 result = cost_client.query.usage(scope=scope, parameters=query)
                 break
             except Exception as e:
-                if ("429" in str(e) or "TooManyRequests" in str(e)) and retry < 2:
-                    _time.sleep(10 * (retry + 1))
+                if ("429" in str(e) or "TooManyRequests" in str(e)) and retry < 1:
+                    _time.sleep(5)
                     continue
                 raise
 
