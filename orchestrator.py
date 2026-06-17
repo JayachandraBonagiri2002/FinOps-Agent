@@ -178,7 +178,7 @@ def run_conversational(user_query: str, conversation_history: list = None) -> tu
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_query})
 
-    final_response, tool_calls = chat_with_tools(messages, FINOPS_TOOLS, max_iterations=5)
+    final_response, tool_calls = chat_with_tools(messages, FINOPS_TOOLS, max_iterations=8)
 
     conversation_history.append({"role": "user", "content": user_query})
     conversation_history.append({"role": "assistant", "content": final_response})

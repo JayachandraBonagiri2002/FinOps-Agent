@@ -157,7 +157,7 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
     iterations = 0
     tool_calls_log = []
     start_time = time.time()
-    MAX_TOTAL_TIME = 120  # Hard cap: 2 minutes for the entire conversation turn
+    MAX_TOTAL_TIME = 300  # Hard cap: 5 minutes for the entire conversation turn
 
     while iterations < max_iterations:
         iterations += 1

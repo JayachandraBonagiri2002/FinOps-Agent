@@ -131,7 +131,7 @@ import time as _time_module
 _COST_CACHE = {}
 _COST_CACHE_TTL = 120  # seconds
 
-_CACHEABLE_TOOLS = {"query_cost_data", "compare_costs", "get_cost_trend", "detect_anomalies", "generate_savings_report"}
+_CACHEABLE_TOOLS = {"query_cost_data", "compare_costs", "get_cost_trend", "detect_anomalies", "generate_savings_report", "check_resource_utilization"}
 
 
 def _cache_key(tool_name, arguments):
@@ -591,24 +591,29 @@ def _live_check_resource_utilization(args: dict, state: dict) -> str:
                         "recommendation": "VM is already deallocated (not running, not incurring compute charges). Only disk storage cost applies. Safe to delete if no longer needed.",
                     }, default=str)
 
-                # Check activity logs for recent start/stop events
+                # Check activity logs for recent start/stop events (with 5s timeout)
                 last_start_time = None
                 days_running = None
                 try:
-                    monitor_client = clients["monitor"]
-                    log_end = datetime.now(timezone.utc)
-                    log_start = log_end - timedelta(days=14)
-                    log_filter = (
-                        f"eventTimestamp ge '{log_start.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
-                        f"and eventTimestamp le '{log_end.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
-                        f"and resourceUri eq '{resource.id}' "
-                        f"and operationName.value eq 'Microsoft.Compute/virtualMachines/start/action'"
-                    )
-                    activity_logs = list(monitor_client.activity_logs.list(filter=log_filter))
-                    if activity_logs:
-                        latest = max(activity_logs, key=lambda x: x.event_timestamp)
-                        last_start_time = latest.event_timestamp.strftime('%Y-%m-%d %H:%M UTC')
-                        days_running = (log_end - latest.event_timestamp).days
+                    def _fetch_activity_log():
+                        monitor_client = clients["monitor"]
+                        log_end = datetime.now(timezone.utc)
+                        log_start = log_end - timedelta(days=14)
+                        log_filter = (
+                            f"eventTimestamp ge '{log_start.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
+                            f"and eventTimestamp le '{log_end.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
+                            f"and resourceUri eq '{resource.id}' "
+                            f"and operationName.value eq 'Microsoft.Compute/virtualMachines/start/action'"
+                        )
+                        logs = list(monitor_client.activity_logs.list(filter=log_filter))
+                        if logs:
+                            latest = max(logs, key=lambda x: x.event_timestamp)
+                            return latest.event_timestamp.strftime('%Y-%m-%d %H:%M UTC'), (log_end - latest.event_timestamp).days
+                        return None, None
+
+                    with ThreadPoolExecutor(max_workers=1) as log_executor:
+                        log_future = log_executor.submit(_fetch_activity_log)
+                        last_start_time, days_running = log_future.result(timeout=5)
                 except Exception:
                     pass
 
