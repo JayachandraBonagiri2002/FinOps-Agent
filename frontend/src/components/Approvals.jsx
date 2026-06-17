@@ -42,7 +42,7 @@ export default function Approvals() {
 
   return (
     <div className="flex-1 overflow-y-auto bg-gradient-to-b from-[#0f0f0f] to-[#1a1a1a]">
-      <div className="w-full max-w-4xl mx-auto px-6 py-8">
+      <div className="w-full max-w-6xl mx-auto px-6 py-8">
         <div className="flex items-center gap-3 mb-2">
           <div className="p-2.5 rounded-lg bg-green-500/20">
             <ShieldCheck size={20} className="text-green-400" strokeWidth={1.5} />
