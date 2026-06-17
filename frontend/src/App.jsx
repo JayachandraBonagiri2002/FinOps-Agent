@@ -15,7 +15,16 @@ function App() {
   }, [])
 
   return (
-    <div className="absolute inset-0 flex overflow-hidden bg-surface-0 text-text-primary font-sans antialiased">
+    <div
+      id="app-shell"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        display: 'flex',
+        overflow: 'hidden',
+        background: 'var(--color-surface-0, #0a0a0c)',
+      }}
+    >
       <Sidebar
         activeView={activeView}
         setActiveView={setActiveView}
@@ -23,18 +32,50 @@ function App() {
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={handleNewChat}
       />
-      <main className="flex-1 min-w-0 h-full relative bg-surface-0 w-full">
-        {/* All panels stay mounted to preserve state — only visibility changes */}
-        <div className={activeView === 'chat' ? 'h-full w-full' : 'hidden'}>
+
+      {/* Main content area — flex:1 takes remaining width after sidebar */}
+      <div style={{ flex: 1, minWidth: 0, height: '100%', position: 'relative' }}>
+        {/*
+          All three views are ALWAYS mounted (never unmounted).
+          We use display:none to hide inactive ones.
+          This preserves all state (chat messages, dashboard data, etc.)
+        */}
+        <div
+          id="view-chat"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: activeView === 'chat' ? 'flex' : 'none',
+            flexDirection: 'column',
+          }}
+        >
           <ChatPanel ref={chatRef} />
         </div>
-        <div className={activeView === 'dashboard' ? 'h-full w-full overflow-y-auto' : 'hidden'}>
+
+        <div
+          id="view-dashboard"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: activeView === 'dashboard' ? 'block' : 'none',
+            overflowY: 'auto',
+          }}
+        >
           <Dashboard />
         </div>
-        <div className={activeView === 'approvals' ? 'h-full w-full overflow-y-auto' : 'hidden'}>
+
+        <div
+          id="view-approvals"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: activeView === 'approvals' ? 'block' : 'none',
+            overflowY: 'auto',
+          }}
+        >
           <Approvals />
         </div>
-      </main>
+      </div>
     </div>
   )
 }
