@@ -9,21 +9,21 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   return (
-    <div className="flex h-screen bg-[#0f0f0f]">
+    <div className="flex h-screen bg-[#0a0a0a] text-white">
       <Sidebar
         activeView={activeView}
         setActiveView={setActiveView}
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
       />
-      <main className="flex-1 flex flex-col overflow-hidden bg-gradient-to-br from-[#0f0f0f] via-[#0f0f0f] to-[#1a1a1a]">
-        <div className={activeView === 'chat' ? 'flex-1 flex flex-col overflow-hidden' : 'hidden'}>
+      <main className="flex-1 flex flex-col min-w-0">
+        <div className={`flex-1 flex flex-col min-h-0 ${activeView === 'chat' ? '' : 'hidden'}`}>
           <ChatPanel />
         </div>
-        <div className={activeView === 'dashboard' ? 'flex-1 flex flex-col overflow-hidden' : 'hidden'}>
+        <div className={`flex-1 flex flex-col min-h-0 ${activeView === 'dashboard' ? '' : 'hidden'}`}>
           <Dashboard />
         </div>
-        <div className={activeView === 'approvals' ? 'flex-1 flex flex-col overflow-hidden' : 'hidden'}>
+        <div className={`flex-1 flex flex-col min-h-0 ${activeView === 'approvals' ? '' : 'hidden'}`}>
           <Approvals />
         </div>
       </main>
