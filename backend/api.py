@@ -182,6 +182,120 @@ def clear_trace():
 
 @app.get("/api/dashboard")
 def get_dashboard():
+    """Fetch LIVE dashboard data from Azure Cost Management API."""
+    if not LIVE_MODE:
+        return _get_dashboard_from_csv()
+
+    try:
+        current_week_result = json.loads(execute_tool("query_cost_data", {
+            "time_range": "last_7_days",
+            "group_by": "service",
+        }))
+        prev_week_result = json.loads(execute_tool("query_cost_data", {
+            "time_range": "previous_week",
+            "group_by": "service",
+        }))
+        daily_result = json.loads(execute_tool("get_cost_trend", {
+            "resource_name": "all",
+            "days": 21,
+        }))
+
+        total_weekly = current_week_result.get("summary", {}).get("total_cost", 0)
+        total_prev = prev_week_result.get("summary", {}).get("total_cost", 0)
+        change = ((total_weekly - total_prev) / total_prev * 100) if total_prev > 0 else 0
+
+        potential_savings = total_weekly * 0.12 / 7 * 30
+
+        # Build daily trend from cost trend data
+        daily_trend = []
+        trend_data = daily_result.get("data", daily_result.get("trend", []))
+        if isinstance(trend_data, list):
+            for item in trend_data[:21]:
+                date_val = item.get("date", item.get("UsageDate", ""))
+                cost_val = item.get("cost", item.get("Cost", item.get("total_cost", 0)))
+                if date_val:
+                    daily_trend.append({"date": str(date_val), "cost": float(cost_val) if cost_val else 0})
+
+        # Build by-service breakdown
+        by_environment = []
+        current_data = current_week_result.get("data", [])
+        service_costs = {}
+        for item in current_data:
+            svc = item.get("ServiceName", item.get("service", "Other"))
+            cost = item.get("Cost", item.get("cost", 0))
+            if svc:
+                service_costs[svc] = service_costs.get(svc, 0) + (float(cost) if cost else 0)
+
+        top_services = sorted(service_costs.items(), key=lambda x: x[1], reverse=True)[:8]
+        by_environment = [{"environment": svc, "cost": cost} for svc, cost in top_services]
+
+        # By resource (top spenders)
+        resource_result = json.loads(execute_tool("query_cost_data", {
+            "time_range": "last_7_days",
+            "group_by": "resource",
+        }))
+        resource_data = resource_result.get("data", [])
+        resource_costs = {}
+        for item in resource_data:
+            name = item.get("ResourceName", item.get("resource", item.get("name", "")))
+            cost = item.get("Cost", item.get("cost", 0))
+            if name and cost:
+                resource_costs[name] = resource_costs.get(name, 0) + float(cost)
+
+        top_resources = sorted(resource_costs.items(), key=lambda x: x[1], reverse=True)[:10]
+        by_resource = [{"resource": name, "cost": cost} for name, cost in top_resources]
+
+        # Week-over-week comparison
+        prev_resource_result = json.loads(execute_tool("query_cost_data", {
+            "time_range": "previous_week",
+            "group_by": "resource",
+        }))
+        prev_resource_data = prev_resource_result.get("data", [])
+        prev_resource_costs = {}
+        for item in prev_resource_data:
+            name = item.get("ResourceName", item.get("resource", item.get("name", "")))
+            cost = item.get("Cost", item.get("cost", 0))
+            if name and cost:
+                prev_resource_costs[name] = prev_resource_costs.get(name, 0) + float(cost)
+
+        comparison = []
+        all_resources = set(list(resource_costs.keys())[:15] + list(prev_resource_costs.keys())[:15])
+        for res in sorted(all_resources):
+            this_week = resource_costs.get(res, 0)
+            last_week = prev_resource_costs.get(res, 0)
+            pct = ((this_week - last_week) / last_week * 100) if last_week > 0 else (100 if this_week > 0 else 0)
+            comparison.append({
+                "resource": res,
+                "this_week": round(this_week, 2),
+                "last_week": round(last_week, 2),
+                "change_pct": round(pct, 1),
+            })
+        comparison.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+        comparison = comparison[:15]
+
+        resources_tracked = len(resource_costs)
+
+        return {
+            "kpis": {
+                "weekly_spend": round(total_weekly, 2),
+                "monthly_projection": round(total_weekly / 7 * 30, 2),
+                "resources_tracked": resources_tracked,
+                "potential_savings": round(potential_savings, 2),
+                "change_pct": round(change, 1),
+            },
+            "daily_trend": daily_trend,
+            "by_environment": by_environment,
+            "by_resource": by_resource,
+            "usage_hours": [],
+            "comparison": comparison,
+        }
+    except Exception as e:
+        # Fallback to CSV if live fails
+        return _get_dashboard_from_csv()
+
+
+def _get_dashboard_from_csv():
+    """Fallback: Load dashboard from CSV files (demo mode)."""
     import pandas as pd
     data_dir = Path(__file__).resolve().parent.parent / "data"
     try:
@@ -202,24 +316,15 @@ def get_dashboard():
         idle_resource_savings = float(total_weekly * 0.08 / 7 * 30)
         potential_savings = auto_shutdown_savings + idle_resource_savings
 
-        # Daily trend
         daily = df_all.groupby(df_all["UsageDate"].dt.strftime("%Y-%m-%d"))["CostINR"].sum().reset_index()
         daily.columns = ["date", "cost"]
-
-        # By environment
         env_data = df.groupby("Tags_Environment")["CostINR"].sum().reset_index()
         env_data.columns = ["environment", "cost"]
-
-        # By resource
         res_data = df.groupby("ResourceName")["CostINR"].sum().reset_index().sort_values("CostINR", ascending=False)
         res_data.columns = ["resource", "cost"]
-
-        # Usage hours
         non_prod = df[df["Tags_Environment"].isin(["Development", "Staging"])]
         usage = non_prod.groupby("ResourceName")["UsageHours"].mean().reset_index()
         usage.columns = ["resource", "hours"]
-
-        # Week-over-week
         current_week = df.groupby("ResourceName")["CostINR"].sum().reset_index()
         current_week.columns = ["resource", "this_week"]
         prev_week = df_hist[df_hist["UsageDate"] >= "2026-05-25"].groupby("ResourceName")["CostINR"].sum().reset_index()
