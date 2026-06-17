@@ -28,22 +28,29 @@ def fetch_subscriptions_from_azure():
     global SUBSCRIPTION_IDS, SUBSCRIPTION_NAMES
     try:
         import subprocess
-        az_cmd = os.path.join(AZ_CLI_PATH, "az.cmd")
-        result = subprocess.run(
-            f'"{az_cmd}" account list --query "[?state==\'Enabled\'].{{id:id, name:name}}" -o json',
-            capture_output=True, text=True, timeout=15, shell=True,
-        )
-        if result.returncode == 0:
-            subs = json.loads(result.stdout)
-            fetched_ids = []
-            fetched_names = {}
-            for sub in subs:
-                fetched_ids.append(sub["id"])
-                fetched_names[sub["id"]] = sub["name"]
-            if fetched_ids:
-                SUBSCRIPTION_IDS = fetched_ids
-                SUBSCRIPTION_NAMES = fetched_names
-                return fetched_names
+        # Try multiple paths to find az command
+        az_commands = [
+            'az account list --query "[?state==\'Enabled\'].{id:id, name:name}" -o json',
+            f'"{os.path.join(AZ_CLI_PATH, "az.cmd")}" account list --query "[?state==\'Enabled\'].{{id:id, name:name}}" -o json',
+        ]
+        for cmd in az_commands:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=15, shell=True,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    subs = json.loads(result.stdout)
+                    fetched_ids = []
+                    fetched_names = {}
+                    for sub in subs:
+                        fetched_ids.append(sub["id"])
+                        fetched_names[sub["id"]] = sub["name"]
+                    if fetched_ids:
+                        SUBSCRIPTION_IDS = fetched_ids
+                        SUBSCRIPTION_NAMES = fetched_names
+                        return fetched_names
+            except Exception:
+                continue
     except Exception:
         pass
     return SUBSCRIPTION_NAMES
