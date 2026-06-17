@@ -11,9 +11,19 @@ from tools.definitions import FINOPS_TOOLS
 
 
 def _get_azure_subscriptions():
-    """Dynamically fetch Azure subscriptions from current Azure CLI login."""
+    """Dynamically fetch Azure subscriptions from the CURRENT tenant only."""
     try:
-        cmd = 'az account list --query "[?state==\'Enabled\'].{name:name, id:id}" -o json'
+        # First get the current account's tenant
+        current_cmd = 'az account show --query "tenantId" -o tsv'
+        current_result = subprocess.run(current_cmd, capture_output=True, text=True, timeout=10, shell=True)
+        current_tenant = current_result.stdout.strip() if current_result.returncode == 0 else None
+
+        # List only subscriptions from the current tenant
+        if current_tenant:
+            cmd = f'az account list --query "[?state==\'Enabled\' && tenantId==\'{current_tenant}\'].{{name:name, id:id}}" -o json'
+        else:
+            cmd = 'az account list --query "[?state==\'Enabled\'].{name:name, id:id}" -o json'
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, shell=True)
         if result.returncode == 0:
             subs = json.loads(result.stdout)

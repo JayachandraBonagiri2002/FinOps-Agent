@@ -24,15 +24,34 @@ SUBSCRIPTION_NAMES = {}
 
 
 def fetch_subscriptions_from_azure():
-    """Dynamically fetch all subscriptions accessible to the logged-in user via az CLI."""
+    """Dynamically fetch subscriptions from the CURRENT TENANT only (not cached old sessions)."""
     global SUBSCRIPTION_IDS, SUBSCRIPTION_NAMES
     try:
         import subprocess
-        # Try multiple paths to find az command
+
+        # First get the current tenant ID
+        current_tenant = None
+        try:
+            tenant_result = subprocess.run(
+                'az account show --query "tenantId" -o tsv',
+                capture_output=True, text=True, timeout=10, shell=True,
+            )
+            if tenant_result.returncode == 0:
+                current_tenant = tenant_result.stdout.strip()
+        except Exception:
+            pass
+
+        # Build command to filter by current tenant
+        if current_tenant:
+            query = f"[?state=='Enabled' && tenantId=='{current_tenant}'].{{id:id, name:name}}"
+        else:
+            query = "[?state=='Enabled'].{id:id, name:name}"
+
         az_commands = [
-            'az account list --query "[?state==\'Enabled\'].{id:id, name:name}" -o json',
-            f'"{os.path.join(AZ_CLI_PATH, "az.cmd")}" account list --query "[?state==\'Enabled\'].{{id:id, name:name}}" -o json',
+            f'az account list --query "{query}" -o json',
+            f'"{os.path.join(AZ_CLI_PATH, "az.cmd")}" account list --query "{query}" -o json',
         ]
+
         for cmd in az_commands:
             try:
                 result = subprocess.run(
