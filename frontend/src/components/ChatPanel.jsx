@@ -134,8 +134,8 @@ export default function ChatPanel() {
       <div className="flex-1 overflow-y-auto flex flex-col">
         {messages.length === 0 ? (
           /* ===== EMPTY STATE ===== */
-          <div className="flex-1 flex flex-col items-center justify-center px-4 pb-[160px]">
-            <div className="w-full max-w-6xl mx-auto flex flex-col items-center">
+          <div className="flex-1 flex flex-col items-center justify-center px-6 lg:px-12 xl:px-24 pb-[160px]">
+            <div className="w-full flex flex-col items-center">
               {/* Icon with gradient glow */}
               <div className="relative mb-8">
                 <div className="absolute inset-0 w-20 h-20 rounded-full bg-gradient-to-r from-emerald-500/40 via-cyan-500/30 to-blue-500/20 blur-2xl animate-pulse"></div>
@@ -145,17 +145,17 @@ export default function ChatPanel() {
               </div>
 
               {/* Title */}
-              <h1 className="text-4xl font-bold text-white mb-3 text-center tracking-tight max-w-2xl">
+              <h1 className="text-4xl font-bold text-white mb-3 text-center tracking-tight">
                 How can I help optimize your cloud costs?
               </h1>
 
               {/* Subtitle */}
-              <p className="text-base text-gray-400 text-center max-w-xl mb-12 leading-relaxed">
+              <p className="text-base text-gray-400 text-center mb-12 leading-relaxed max-w-2xl">
                 Ask me anything about your Azure spend, waste detection, cost trends, resource optimization, or run a full scan.
               </p>
 
               {/* Quick action cards - improved grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-4xl">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4 gap-4 w-full max-w-7xl">
                 {quickActions.map((action, i) => (
                   <button
                     key={i}
@@ -177,13 +177,13 @@ export default function ChatPanel() {
         ) : (
           /* ===== CHAT MESSAGES ===== */
           <div className="flex-1 overflow-y-auto">
-            <div className="w-full max-w-6xl mx-auto py-6">
+            <div className="w-full py-6 px-6 lg:px-12 xl:px-24">
               {messages.map((msg, idx) => (
-                <div key={idx} className="mb-6 px-4 sm:px-6">
+                <div key={idx} className="mb-6 max-w-7xl mx-auto">
                   {msg.role === 'user' ? (
                     /* User message */
                     <div className="flex justify-end">
-                      <div className="max-w-3xl lg:max-w-4xl">
+                      <div className="max-w-[70%]">
                         <div className="bg-[#2a2a2a] rounded-2xl px-6 py-3.5 border border-[#3a3a3a] shadow-sm">
                           <p className="text-sm sm:text-base text-white leading-relaxed whitespace-pre-wrap">{msg.content}</p>
                         </div>
@@ -197,7 +197,7 @@ export default function ChatPanel() {
                           <Bot size={16} className="text-white" strokeWidth={1.5} />
                         </div>
                       </div>
-                      <div className="flex-1 min-w-0 max-w-5xl">
+                      <div className="flex-1 min-w-0">
                         <div className="message-content text-sm sm:text-base text-gray-300 leading-relaxed">
                           <ReactMarkdown>{msg.content}</ReactMarkdown>
                         </div>
@@ -242,7 +242,7 @@ export default function ChatPanel() {
 
               {/* Loading indicator */}
               {loading && (
-                <div className="mb-6 px-4 sm:px-6">
+                <div className="mb-6 max-w-7xl mx-auto">
                   <div className="flex gap-3 sm:gap-4">
                     <div className="flex-shrink-0">
                       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center shadow-sm shadow-emerald-500/30">
@@ -266,8 +266,8 @@ export default function ChatPanel() {
         )}
 
         {/* ===== INPUT BAR - sticky at bottom ===== */}
-        <div className="flex-shrink-0 bg-gradient-to-t from-[#0f0f0f] via-[#0f0f0f]/95 to-[#0f0f0f]/0 border-t border-[#1a1a1a] px-4 pt-6 pb-6">
-          <div className="w-full max-w-6xl mx-auto">
+        <div className="flex-shrink-0 bg-gradient-to-t from-[#0f0f0f] via-[#0f0f0f]/95 to-[#0f0f0f]/0 border-t border-[#1a1a1a] px-6 lg:px-12 xl:px-24 pt-6 pb-6">
+          <div className="w-full max-w-7xl mx-auto">
             <div className="relative bg-[#1e1e1e] rounded-2xl border border-[#2a2a2a] focus-within:border-[#3a3a3a] focus-within:shadow-lg focus-within:shadow-emerald-500/10 transition-all duration-300">
               <textarea
                 ref={inputRef}

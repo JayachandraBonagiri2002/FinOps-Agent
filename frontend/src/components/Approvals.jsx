@@ -42,7 +42,8 @@ export default function Approvals() {
 
   return (
     <div className="flex-1 overflow-y-auto bg-gradient-to-b from-[#0f0f0f] to-[#1a1a1a]">
-      <div className="w-full max-w-6xl mx-auto px-6 py-8">
+      <div className="w-full px-6 lg:px-12 xl:px-24 py-8">
+        <div className="max-w-7xl mx-auto">
         <div className="flex items-center gap-3 mb-2">
           <div className="p-2.5 rounded-lg bg-green-500/20">
             <ShieldCheck size={20} className="text-green-400" strokeWidth={1.5} />
@@ -53,8 +54,9 @@ export default function Approvals() {
           Actions below require your approval before execution. The agent determined these are too risky to auto-execute.
         </p>
 
+        </div>
         {approvals.length === 0 ? (
-          <div className="bg-gradient-to-br from-[#1a1a1a] to-[#121212] rounded-2xl border border-[#1a1a1a] p-16 text-center shadow-sm">
+          <div className="bg-gradient-to-br from-[#1a1a1a] to-[#121212] rounded-2xl border border-[#1a1a1a] p-16 text-center shadow-sm max-w-4xl mx-auto">
             <ShieldCheck size={56} className="text-green-500/25 mx-auto mb-6" strokeWidth={1} />
             <p className="text-gray-300 text-lg font-semibold">No pending approvals</p>
             <p className="text-gray-500 text-sm mt-3">

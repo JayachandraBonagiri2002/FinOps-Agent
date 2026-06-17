@@ -39,7 +39,7 @@ export default function Dashboard() {
 
   return (
     <div className="flex-1 overflow-y-auto bg-gradient-to-b from-[#0f0f0f] to-[#1a1a1a]">
-      <div className="w-full px-8 py-8">
+      <div className="w-full px-6 lg:px-12 xl:px-16 py-8">
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">Cost Dashboard</h1>
