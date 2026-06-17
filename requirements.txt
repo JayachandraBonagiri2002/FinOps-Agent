@@ -3,7 +3,6 @@ fastapi>=0.111.0
 uvicorn>=0.30.0
 pandas>=2.2.0
 python-dotenv>=1.0.0
-plotly>=5.18.0
 azure-identity>=1.16.0
 azure-mgmt-costmanagement>=4.0.0
 azure-mgmt-compute>=31.0.0
