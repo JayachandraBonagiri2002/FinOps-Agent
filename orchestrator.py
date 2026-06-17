@@ -4,14 +4,37 @@ Uses OpenAI function calling to let the AI agent decide what to investigate,
 diagnose, and remediate — a true agentic workflow, not a fixed pipeline.
 """
 import json
+import subprocess
 from datetime import datetime, timezone
 from utils.llm_client import chat_with_tools
 from tools.definitions import FINOPS_TOOLS
 
 
+def _get_azure_subscriptions():
+    """Dynamically fetch Azure subscriptions from current Azure CLI login."""
+    try:
+        cmd = 'az account list --query "[?state==\'Enabled\'].{name:name, id:id}" -o json'
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, shell=True)
+        if result.returncode == 0:
+            subs = json.loads(result.stdout)
+            if subs:
+                return "\n".join([f"- {sub['name']} ({sub['id']})" for sub in subs])
+    except Exception:
+        pass
+    # Fallback to environment variable if Azure CLI fails
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    sub_ids = os.getenv("AZURE_SUBSCRIPTION_IDS", "").split(",")
+    if sub_ids and sub_ids[0]:
+        return "\n".join([f"- Subscription {i+1} ({sub_id.strip()})" for i, sub_id in enumerate(sub_ids)])
+    return "- No subscriptions found. User needs to run 'az login' first."
+
+
 def _build_system_prompt():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return f"""You are an autonomous Enterprise Cloud FinOps Agent managing Azure infrastructure for ABB (managed by HCLTech).
+    subscriptions = _get_azure_subscriptions()
+    return f"""You are an autonomous Enterprise Cloud FinOps Agent managing Azure infrastructure.
 
 Today's date: {today}
 
@@ -53,12 +76,8 @@ query_cost_data, compare_costs, get_resource_details, detect_anomalies, check_re
 - For each significant cost change, explain the likely REASON (new deployment, scale-up, orphaned resource, idle VM, etc.)
 - Always present findings with: resource name, cost change amount, % change, and recommended action
 
-## Subscriptions
-- ABB-APP-NMG-DEV (35385e49-ebf7-46c4-98da-04f2d3dfa146)
-- ABB-APP-NMG-PROD-01 (a4159714-6672-4c01-8e27-0c4c3569e7d5)
-- ABB-APP-NMG-PROD-APM (ba3d8367-6849-475f-a8fe-558b2d1d9d3e)
-- ABB-APP-NMG-STAGE (f291555e-6d94-4131-b099-e0c60d420777)
-- ABB-MGMT (ce543a1a-5f5a-455f-9ded-0d5f8cd06f6f)
+## Subscriptions (from current Azure CLI login)
+{subscriptions}
 
 Be thorough, data-driven, explain reasoning. Show business impact in INR.
 """
