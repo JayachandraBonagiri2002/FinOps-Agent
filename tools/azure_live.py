@@ -562,30 +562,114 @@ def _live_check_resource_utilization(args: dict, state: dict) -> str:
                         "note": f"Utilization metrics only available for VMs. This is a {resource.type}.",
                     })
 
+                rg = resource.id.split("/resourceGroups/")[1].split("/")[0]
+                compute_client = clients["compute"]
+
+                # Get VM instance view for power state
+                power_state = "Unknown"
+                vm_size = "Unknown"
+                try:
+                    vm = compute_client.virtual_machines.get(rg, resource.name, expand="instanceView")
+                    vm_size = vm.hardware_profile.vm_size
+                    if vm.instance_view and vm.instance_view.statuses:
+                        power_state = next(
+                            (s.display_status for s in vm.instance_view.statuses if "PowerState" in s.code), "Unknown"
+                        )
+                except Exception:
+                    pass
+
+                # If VM is deallocated, no need to check metrics
+                if "deallocated" in power_state.lower():
+                    return json.dumps({
+                        "resource_name": resource_name,
+                        "resource_id": resource.id,
+                        "subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]),
+                        "vm_size": vm_size,
+                        "power_state": power_state,
+                        "status": "deallocated",
+                        "period_days": period_days,
+                        "recommendation": "VM is already deallocated (not running, not incurring compute charges). Only disk storage cost applies. Safe to delete if no longer needed.",
+                    }, default=str)
+
+                # Check activity logs for recent start/stop events
+                last_start_time = None
+                days_running = None
+                try:
+                    monitor_client = clients["monitor"]
+                    log_end = datetime.now(timezone.utc)
+                    log_start = log_end - timedelta(days=14)
+                    log_filter = (
+                        f"eventTimestamp ge '{log_start.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
+                        f"and eventTimestamp le '{log_end.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
+                        f"and resourceUri eq '{resource.id}' "
+                        f"and operationName.value eq 'Microsoft.Compute/virtualMachines/start/action'"
+                    )
+                    activity_logs = list(monitor_client.activity_logs.list(filter=log_filter))
+                    if activity_logs:
+                        latest = max(activity_logs, key=lambda x: x.event_timestamp)
+                        last_start_time = latest.event_timestamp.strftime('%Y-%m-%d %H:%M UTC')
+                        days_running = (log_end - latest.event_timestamp).days
+                except Exception:
+                    pass
+
+                # Get performance metrics
                 try:
                     metrics = _get_vm_metrics(clients["monitor"], resource.id)
                 except Exception as e:
                     return json.dumps({
                         "resource_name": resource_name,
                         "subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]),
+                        "power_state": power_state,
+                        "vm_size": vm_size,
                         "status": "metrics_unavailable",
-                        "note": f"VM found but metrics unavailable: {str(e)[:80]}. May need Monitoring Reader role.",
+                        "note": f"VM is running ({power_state}) but metrics unavailable: {str(e)[:80]}.",
                     })
 
                 cpu_avg = metrics.get("Percentage CPU", {}).get("average", 0)
-                status = "idle" if cpu_avg < 5 else "underutilized" if cpu_avg < 20 else "moderate" if cpu_avg < 60 else "healthy"
+                cpu_max = metrics.get("Percentage CPU", {}).get("max", 0)
+                net_in = metrics.get("Network In Total", {}).get("average", 0)
+                net_out = metrics.get("Network Out Total", {}).get("average", 0)
+
+                # Determine status with more context
+                if cpu_avg < 5 and cpu_max < 15:
+                    status = "idle"
+                    recommendation = (
+                        f"VM has been idle for the past {period_days} days "
+                        f"(CPU avg: {cpu_avg:.1f}%, max: {cpu_max:.1f}%). "
+                        f"{'Running since ' + last_start_time + ' (' + str(days_running) + ' days ago). ' if last_start_time else ''}"
+                        f"SAFE TO DELETE or deallocate to stop all charges."
+                    )
+                elif cpu_avg < 20:
+                    status = "underutilized"
+                    recommendation = (
+                        f"VM is underutilized (CPU avg: {cpu_avg:.1f}%, max: {cpu_max:.1f}%). "
+                        f"Current size: {vm_size}. "
+                        f"RECOMMEND: Right-size to a smaller VM SKU to save ~40-60% cost. Do NOT delete — it is in use."
+                    )
+                elif cpu_avg < 60:
+                    status = "moderate"
+                    recommendation = f"VM has moderate utilization (CPU avg: {cpu_avg:.1f}%). Current size ({vm_size}) is appropriate. No action needed."
+                else:
+                    status = "healthy"
+                    recommendation = f"VM is well-utilized (CPU avg: {cpu_avg:.1f}%). Running efficiently at current size ({vm_size})."
 
                 return json.dumps({
                     "resource_name": resource_name,
                     "resource_id": resource.id,
                     "subscription": SUBSCRIPTION_NAMES.get(sub_id, sub_id[:8]),
+                    "vm_size": vm_size,
+                    "power_state": power_state,
                     "period_days": period_days,
-                    "utilization": metrics,
+                    "last_start_time": last_start_time,
+                    "days_running_since_last_start": days_running,
+                    "utilization": {
+                        "cpu_avg_pct": cpu_avg,
+                        "cpu_max_pct": cpu_max,
+                        "network_in_avg_bytes": round(net_in, 0),
+                        "network_out_avg_bytes": round(net_out, 0),
+                    },
                     "status": status,
-                    "recommendation": f"VM is {status}. " + (
-                        "Consider right-sizing or deallocating." if status in ("idle", "underutilized")
-                        else "Current size appears appropriate."
-                    ),
+                    "recommendation": recommendation,
                 }, default=str)
         except Exception:
             continue
@@ -593,7 +677,7 @@ def _live_check_resource_utilization(args: dict, state: dict) -> str:
     return json.dumps({
         "resource_name": resource_name,
         "status": "not_accessible",
-        "note": f"Resource '{resource_name}' not accessible for utilization check. It likely exists in a subscription where you lack Reader/Monitoring Reader role. Proceed with cost-based analysis instead.",
+        "note": f"Resource '{resource_name}' not accessible for utilization check.",
     })
 
 
