@@ -588,7 +588,7 @@ def _live_check_resource_utilization(args: dict, state: dict) -> str:
                         "power_state": power_state,
                         "status": "deallocated",
                         "period_days": period_days,
-                        "recommendation": "VM is already deallocated (not running, not incurring compute charges). Only disk storage cost applies. Safe to delete if no longer needed.",
+                        "recommendation": "DEALLOCATED — VM is stopped. No compute charges but disk storage still costs money. DELETE this VM if it is no longer needed.",
                     }, default=str)
 
                 # Check activity logs for recent start/stop events (with 5s timeout)

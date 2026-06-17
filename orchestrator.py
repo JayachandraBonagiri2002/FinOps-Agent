@@ -99,21 +99,29 @@ When user asks about "waste", "unused", "resources to delete", "cleanup", or "op
 6. Use detect_anomalies ONLY for cost spike analysis, NOT waste identification
 
 ## RESPONSE FORMAT for waste/optimization:
-Group results by action type with SPECIFIC data from the tools:
+Group results by action type. Use bullet lists, NOT tables (tables render poorly in chat).
 
-### Safe to Delete (idle VMs — 0% utilization for 7+ days)
-| VM Name | CPU Avg | Power State | Running Since | Action |
-Show only VMs where status="idle". Recommend: "Deallocate to stop charges, or delete if no longer needed"
+**Category 1: Deallocated VMs (already stopped — delete if unneeded)**
+For each, show:
+- **VM-Name** — Deallocated (stopped). Disk storage still costing. → Delete if not needed.
 
-### Right-Size (underutilized — in use but oversized)
-| VM Name | CPU Avg | Current Size | Suggested Action |
-Show only VMs where status="underutilized". Recommend: "Resize to smaller SKU to save 40-60%". Do NOT suggest deletion.
+**Category 2: Idle VMs (running but doing nothing — deallocate immediately)**
+For each, show:
+- **VM-Name** — CPU: X.X% avg over 7 days | Size: Standard_XX | Running since: DATE → Deallocate now to stop charges, delete if permanently unneeded.
 
-### Unattached Disks (safe to delete immediately)
-| Disk Name | Size | SKU | Action |
-These have no VM attached. Safe to delete.
+**Category 3: Underutilized VMs (in use but oversized — resize, do NOT delete)**
+For each, show:
+- **VM-Name** — CPU: X% avg | Current: Standard_D4s → Resize to Standard_D2s (save ~50%)
 
-IMPORTANT: Never mix categories. Idle = delete/deallocate. Underutilized = resize. Do not say "delete or resize" for the same resource.
+**Category 4: Unattached Disks (safe to delete immediately)**
+- **Disk-Name** — Size: X GB, SKU: Standard_LRS → Delete (no VM attached)
+
+RULES:
+- Never mix categories. Deallocated/Idle = delete. Underutilized = resize only.
+- Never say "delete or resize" for the same resource — pick one.
+- Skip VMs that are "moderate" or "healthy" — do NOT list them.
+- If a VM is deallocated, do NOT show CPU (it has none). Just say "Deallocated".
+- Keep it concise — no long paragraphs, just the bullet list with data.
 
 ## Cost Analysis & Auditing
 - ALWAYS use today's date to calculate correct periods. "This month" = current calendar month, "last month" = previous calendar month, "this week" = last 7 days from today.
