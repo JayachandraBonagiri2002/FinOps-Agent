@@ -125,12 +125,32 @@ def get_all_clients():
     return {sub_id: get_clients(sub_id) for sub_id in SUBSCRIPTION_IDS}
 
 
+import time as _time_module
+
+# Cache for cost queries — avoids hitting Azure when the same query is repeated within 2 minutes
+_COST_CACHE = {}
+_COST_CACHE_TTL = 120  # seconds
+
+_CACHEABLE_TOOLS = {"query_cost_data", "compare_costs", "get_cost_trend", "detect_anomalies", "generate_savings_report"}
+
+
+def _cache_key(tool_name, arguments):
+    return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+
+
 def execute_tool_live(tool_name: str, arguments: dict, session_state: dict = None) -> str:
     if not AZURE_AVAILABLE:
         return json.dumps({"error": "Azure SDK not installed. Run: pip install azure-identity azure-mgmt-costmanagement azure-mgmt-compute azure-mgmt-resource azure-mgmt-monitor"})
 
     if not SUBSCRIPTION_ID:
         return json.dumps({"error": "AZURE_SUBSCRIPTION_ID not set in .env file"})
+
+    # Check cache for cost-related queries
+    if tool_name in _CACHEABLE_TOOLS:
+        key = _cache_key(tool_name, arguments)
+        cached = _COST_CACHE.get(key)
+        if cached and (_time_module.time() - cached["ts"]) < _COST_CACHE_TTL:
+            return cached["result"]
 
     handlers = {
         "query_cost_data": _live_query_cost_data,
@@ -152,33 +172,37 @@ def execute_tool_live(tool_name: str, arguments: dict, session_state: dict = Non
     if not handler:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
-    max_retries = 2
+    max_retries = 3
     for attempt in range(max_retries):
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(handler, arguments, session_state or {})
-                result = future.result(timeout=45)
+                result = future.result(timeout=60)
 
-            # Check if result is a rate-limit error and retry once
+            # Check if result is a rate-limit error and retry
             try:
                 parsed = json.loads(result)
                 if "error" in parsed and ("429" in str(parsed["error"]) or "Too many requests" in str(parsed["error"]) or "TooManyRequests" in str(parsed["error"])):
                     if attempt < max_retries - 1:
-                        import time
-                        time.sleep(5)
+                        wait = 10 * (attempt + 1)
+                        _time_module.sleep(wait)
                         continue
                     return result
             except (json.JSONDecodeError, TypeError):
                 pass
 
+            # Cache successful result
+            if tool_name in _CACHEABLE_TOOLS:
+                _COST_CACHE[_cache_key(tool_name, arguments)] = {"result": result, "ts": _time_module.time()}
+
             return result
         except FuturesTimeoutError:
-            return json.dumps({"error": f"Tool '{tool_name}' timed out after 45 seconds. Azure APIs may be overloaded — try again shortly.", "tool": tool_name})
+            return json.dumps({"error": f"Tool '{tool_name}' timed out after 60 seconds. Azure APIs may be overloaded — try again shortly.", "tool": tool_name})
         except Exception as e:
             error_str = str(e)
             if ("429" in error_str or "TooManyRequests" in error_str) and attempt < max_retries - 1:
-                import time
-                time.sleep(5)
+                wait = 10 * (attempt + 1)
+                _time_module.sleep(wait)
                 continue
             return json.dumps({"error": f"Azure API error: {error_str}", "tool": tool_name})
 
@@ -280,13 +304,13 @@ def _live_query_cost_data(args: dict, state: dict) -> str:
             ),
         )
 
-        for retry in range(2):
+        for retry in range(3):
             try:
                 result = cost_client.query.usage(scope=scope, parameters=query)
                 break
             except Exception as e:
-                if ("429" in str(e) or "TooManyRequests" in str(e)) and retry < 1:
-                    _time.sleep(5)
+                if ("429" in str(e) or "TooManyRequests" in str(e)) and retry < 2:
+                    _time.sleep(15 * (retry + 1))
                     continue
                 raise
 

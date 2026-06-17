@@ -211,7 +211,7 @@ def chat_with_tools(messages: list, tools: list, temperature: float = 0.3, max_i
 
             # Stagger calls to cost-heavy tools to avoid Azure 429 rate limits
             if i > 0 and fn_name in cost_api_tools:
-                time.sleep(1)
+                time.sleep(3)
 
             tool_calls_log.append({
                 "iteration": iterations,

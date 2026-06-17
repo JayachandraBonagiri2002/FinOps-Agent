@@ -180,11 +180,21 @@ def clear_trace():
     return {"status": "cleared"}
 
 
+import time as _api_time
+
+_dashboard_cache = {"data": None, "ts": 0}
+_DASHBOARD_CACHE_TTL = 120  # 2 minutes
+
+
 @app.get("/api/dashboard")
 def get_dashboard():
     """Fetch LIVE dashboard data from Azure Cost Management API."""
     if not LIVE_MODE:
         return _get_dashboard_from_csv()
+
+    # Return cached dashboard if fresh (prevents rate-limiting)
+    if _dashboard_cache["data"] and (_api_time.time() - _dashboard_cache["ts"]) < _DASHBOARD_CACHE_TTL:
+        return _dashboard_cache["data"]
 
     try:
         # Current week costs by service
@@ -193,11 +203,15 @@ def get_dashboard():
             "group_by": "service",
         }))
 
+        _api_time.sleep(2)  # Stagger to avoid 429
+
         # Last 3 weeks daily trend (raw data grouped by resource with dates)
         trend_result = json.loads(execute_tool("query_cost_data", {
             "time_range": "last_30_days",
             "group_by": "resource",
         }))
+
+        _api_time.sleep(2)  # Stagger to avoid 429
 
         # Current week by resource
         resource_result = json.loads(execute_tool("query_cost_data", {
@@ -305,7 +319,7 @@ def get_dashboard():
                 "change_pct": round(pct, 1),
             })
 
-        return {
+        result = {
             "kpis": {
                 "weekly_spend": round(total_weekly, 2),
                 "monthly_projection": round(total_weekly / 7 * 30, 2),
@@ -319,6 +333,10 @@ def get_dashboard():
             "usage_hours": [],
             "comparison": comparison,
         }
+        # Cache the result
+        _dashboard_cache["data"] = result
+        _dashboard_cache["ts"] = _api_time.time()
+        return result
     except Exception as e:
         # Fallback to CSV if live fails
         return _get_dashboard_from_csv()
